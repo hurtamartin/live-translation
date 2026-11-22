@@ -164,7 +164,7 @@ class Engine:
         elif self.gate_open and now >= self._hold_until:
             self.gate_open = False
 
-        live = s.on_air and any(ch.active is not None for ch in self.channels.values())
+        live = s.on_air and any(ch.wants_audio for ch in self.channels.values())
         if not (live and self.gate_open):
             self._preroll.append(block)
             self.sending = False

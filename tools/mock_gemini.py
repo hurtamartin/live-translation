@@ -6,6 +6,8 @@ Then:  GEMINI_WS_URL=ws://127.0.0.1:9100/ws GEMINI_API_KEY=test python -m app
 For every second of received audio it answers with a transcript fragment,
 a "translation" fragment and one second of a 24 kHz test tone.
 API key "bad" is rejected like Google does. MOCK_GOAWAY_S=N sends goAway after N s.
+MOCK_DROP_S=N drops the TCP connection after N s without a close frame, as the
+preview backend sometimes does.
 """
 
 from __future__ import annotations
@@ -38,7 +40,9 @@ async def handler(request: web.Request) -> web.WebSocketResponse:
     start = loop.time()
     goaway = float(os.environ.get("MOCK_GOAWAY_S", "0"))
     sent_goaway = False
+    drop = float(os.environ.get("MOCK_DROP_S", "0"))
     received = 0
+    total = 0
     i = 0
     async for msg in ws:
         if msg.type != WSMsgType.TEXT:
@@ -46,7 +50,13 @@ async def handler(request: web.Request) -> web.WebSocketResponse:
         audio = json.loads(msg.data).get("realtimeInput", {}).get("audio")
         if not audio:
             continue
-        received += len(base64.b64decode(audio["data"])) // 2
+        n = len(base64.b64decode(audio["data"])) // 2
+        received += n
+        total += n
+        if drop and loop.time() - start > drop:
+            print(f"mock: dropping {lang} after {total / 16000:.1f} s of audio", flush=True)
+            request.transport.abort()
+            return ws
         if received >= 16000:
             received -= 16000
             word = SRC[i % len(SRC)]
@@ -66,7 +76,7 @@ async def handler(request: web.Request) -> web.WebSocketResponse:
             sent_goaway = True
             await ws.send_str(json.dumps({"goAway": {"timeLeft": "3s"}}))
             loop.call_later(3, lambda: asyncio.ensure_future(ws.close()))
-    print(f"mock: session for {lang} closed", flush=True)
+    print(f"mock: session for {lang} closed after {total / 16000:.1f} s of audio", flush=True)
     return ws
 
 

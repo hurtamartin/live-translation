@@ -29,6 +29,8 @@ HANGOVER_FRAMES = 12                    # keep clients' clocks running across sh
 MAX_FIFO_BYTES = OUT_RATE * 2 * 20      # never let latency grow past 20 s
 SENTENCE_END = tuple(".!?…。！？")
 HISTORY = 80
+GAP_BLOCKS = 50                         # audio kept while reconnecting (5 s of 100 ms blocks)
+GAP_MAX_AGE = 8.0                       # older buffered audio is stale, not worth translating
 
 
 class Channel:
@@ -45,6 +47,9 @@ class Channel:
         self._task: asyncio.Task | None = None
         self._stop_handle: asyncio.TimerHandle | None = None
         self._wake = asyncio.Event()
+        # Input that arrives while a dropped session is being replaced; sent to the
+        # new session so no words are lost to the gap.
+        self._gap: collections.deque[tuple[float, str]] = collections.deque(maxlen=GAP_BLOCKS)
 
         self.segments: collections.deque[dict] = collections.deque(maxlen=HISTORY)
         self._seg: dict | None = None
@@ -171,6 +176,7 @@ class Channel:
                 old, self.active = self.active, conn
                 if old is not None:
                     old.close_later(6.0)   # let the old session finish its sentence
+                self._flush_gap(conn)
                 self.connects += 1
                 backoff = 1.0
                 self._set_status("live")
@@ -182,20 +188,37 @@ class Channel:
                     self.active = None
                 await conn.close()
                 self._set_status("reconnecting", conn.close_reason or "Spojení s Google se přerušilo.")
-                await self._sleep(0.3 if backoff <= 1 else backoff)
+                await self._sleep(0.1 if backoff <= 1 else backoff)
                 backoff = min(backoff * 2, 20)
         except asyncio.CancelledError:
             pass
         finally:
+            self._gap.clear()
             conn, self.active = self.active, None
             if conn is not None:
                 await conn.close()
             self._set_status("idle")
 
+    @property
+    def wants_audio(self) -> bool:
+        """A session is live or being (re)opened, so input should not be dropped."""
+        return self.active is not None or self._task is not None
+
     def send_audio(self, message: str) -> None:
         conn = self.active
         if conn is not None:
             conn.send_audio(message)
+        elif self._task is not None:
+            self._gap.append((time.monotonic(), message))
+
+    def _flush_gap(self, conn: GeminiConnection) -> None:
+        cutoff = time.monotonic() - GAP_MAX_AGE
+        fresh = [m for t, m in self._gap if t >= cutoff]
+        self._gap.clear()
+        if fresh:
+            log.info("[%s] sending %.1f s of audio buffered during reconnect", self.lang, len(fresh) / 10)
+            for m in fresh:
+                conn.send_audio(m)
 
     # ------------------------------------------------------------- Gemini events
 

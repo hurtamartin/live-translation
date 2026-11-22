@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import re
+import time
 from typing import Protocol
 from urllib.parse import quote
 
@@ -114,6 +115,8 @@ class GeminiConnection:
         self._rate_warned = False
         self._closing = False
         self.close_reason = ""
+        self.opened_at = 0.0
+        self.last_rx = 0.0
 
     async def open(self) -> None:
         loop = asyncio.get_running_loop()
@@ -141,6 +144,7 @@ class GeminiConnection:
             reason = (msg.extra or "") if msg.type == aiohttp.WSMsgType.CLOSE else ""
             code = msg.data if msg.type == aiohttp.WSMsgType.CLOSE else self.ws.close_code
             raise self._setup_failure(code, str(reason))
+        self.opened_at = self.last_rx = time.monotonic()
         self._handle_raw(msg)
         self._tasks = [
             asyncio.create_task(self._reader(), name=f"gemini-read-{self.label}"),
@@ -180,6 +184,7 @@ class GeminiConnection:
             while True:
                 msg = await self.ws.receive()
                 if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                    self.last_rx = time.monotonic()
                     if self._handle_raw(msg) == "goaway":
                         self._end("goaway")
                     continue
@@ -193,8 +198,18 @@ class GeminiConnection:
         finally:
             code = self.ws.close_code if self.ws else None
             if not self._closing:
-                self.close_reason = reason
-                log.info("%s: session closed by Google (code %s) %s", self.label, code, reason)
+                now = time.monotonic()
+                if reason:
+                    self.close_reason = reason
+                    log.info("%s: Google closed the session after %.0f s (code %s): %s",
+                             self.label, now - self.opened_at, code, reason)
+                else:
+                    # No close frame: the TCP connection was dropped (preview backend).
+                    exc = self.ws.exception() if self.ws else None
+                    self.close_reason = "Google přerušil spojení bez udání důvodu."
+                    log.info("%s: connection dropped after %.0f s (code %s, last message %.1f s "
+                             "before, %d audio blocks dropped)%s", self.label, now - self.opened_at,
+                             code, now - self.last_rx, self.dropped, f": {exc}" if exc else "")
             self._end(outcome)
 
     def _end(self, outcome: str) -> None:
