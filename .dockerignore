@@ -11,6 +11,8 @@ data/
 docker-compose*.yml
 deploy/
 tools/
+server/tests/
+**/.pytest_cache/
 capture.py
 index.html
 .vscode/

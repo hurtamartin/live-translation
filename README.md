@@ -109,8 +109,15 @@ cd server && GEMINI_WS_URL=ws://127.0.0.1:9100/ws GEMINI_API_KEY=test DATA_DIR=.
 ```
 
 Mock odpovídá na každou sekundu zvuku kouskem přepisu, „překladu“ a tónem. `MOCK_GOAWAY_S=5`
-otestuje předávání relací, klíč `bad` chybu autentizace. Opus/MP3 vyžadují `libopus` a `libmp3lame`
-(v Dockeru jsou); bez nich server běží, jen bez zvuku pro telefony.
+otestuje předávání relací, `MOCK_DROP_S=5` výpadek spojení, klíč `bad` chybu autentizace.
+Opus/MP3 vyžadují `libopus` a `libmp3lame` (v Dockeru jsou); bez nich server běží, jen bez zvuku pro telefony.
+
+Testy (jednotkové i end-to-end proti mocku, bez API klíče, pár sekund):
+
+```bash
+.venv/bin/pip install -r server/requirements-dev.txt
+cd server && ../.venv/bin/python -m pytest
+```
 
 Ikony: `python tools/make_icons.py`.
 
