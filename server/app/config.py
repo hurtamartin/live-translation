@@ -65,7 +65,7 @@ class Settings:
     api_key: str = ""
     model: str = DEFAULT_MODEL
     event_title: str = "Živý překlad"
-    languages: list[str] = field(default_factory=lambda: ["en", "de", "uk"])
+    languages: list[str] = field(default_factory=lambda: ["en", "es", "uk"])
     always_on: list[str] = field(default_factory=list)
     on_air: bool = False
     source: str = "device"
