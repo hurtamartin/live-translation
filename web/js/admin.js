@@ -1,5 +1,7 @@
 // Operator console.
 
+import { toast as showToast, closeSheet, wireSheet, copyText, canCopy } from './ui.js';
+
 const $ = (id) => document.getElementById(id);
 const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
 
@@ -49,15 +51,26 @@ async function api(method, path, body) {
   return data;
 }
 
-let toastTimer = 0;
 function toast(text, error = false) {
-  const t = $('toast');
-  t.textContent = text;
-  t.classList.toggle('error', error);
-  t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), error ? 5000 : 2200);
+  showToast(text, { error, ms: error ? 5000 : 2200 });
 }
+
+/** Styled replacement for confirm(): resolves true when the operator confirms. */
+function ask({ title, body, ok, cancel = 'Zrušit' }) {
+  const dlg = $('confirm');
+  $('confirmTitle').textContent = title;
+  $('confirmBody').textContent = body;
+  $('confirmOk').textContent = ok;
+  $('confirmCancel').textContent = cancel;
+  dlg.returnValue = '';
+  dlg.showModal();
+  $('confirmCancel').focus();
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok'), { once: true });
+  });
+}
+wireSheet($('confirm'));
+$('confirmOk').addEventListener('click', () => closeSheet($('confirm'), 'ok'));
 
 const DB_MIN = -60;
 const pct = (db) => Math.max(0, Math.min(100, ((db - DB_MIN) / -DB_MIN) * 100));
@@ -74,7 +87,10 @@ function showLogin() {
 $('loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const err = $('loginError');
+  const btn = $('loginBtn');
   err.hidden = true;
+  btn.disabled = true;
+  btn.prepend(Object.assign(document.createElement('span'), { className: 'spinner' }));
   try {
     await api('POST', '/api/admin/login', { password: $('password').value });
     $('password').value = '';
@@ -82,7 +98,21 @@ $('loginForm').addEventListener('submit', async (e) => {
   } catch (ex) {
     err.textContent = ex.message;
     err.hidden = false;
+    $('password').select();
+  } finally {
+    btn.disabled = false;
+    btn.querySelector('.spinner')?.remove();
   }
+});
+
+$('reveal').addEventListener('click', () => {
+  const pw = $('password');
+  const show = pw.type === 'password';
+  pw.type = show ? 'text' : 'password';
+  $('reveal').setAttribute('aria-pressed', String(show));
+  $('reveal').setAttribute('aria-label', show ? 'Skrýt heslo' : 'Zobrazit heslo');
+  $('reveal').title = show ? 'Skrýt heslo' : 'Zobrazit heslo';
+  pw.focus();
 });
 
 $('logout').addEventListener('click', async () => {
@@ -132,6 +162,10 @@ function updateOutputs() {
   $('idleOut').textContent = idle === 0 ? 'ihned' : idle < 60 ? `${idle} s` : `${(idle / 60).toFixed(idle % 60 ? 1 : 0)} min`;
   $('meterThr').style.left = pct(+$('gate_threshold_db').value) + '%';
   $('gateFields').setAttribute('aria-disabled', String(!$('gate_enabled').checked));
+  for (const r of document.querySelectorAll('input[type="range"]')) {
+    const min = +r.min || 0, max = +r.max || 100;
+    r.style.setProperty('--fill', `${((+r.value - min) / (max - min)) * 100}%`);
+  }
 }
 
 function applySettings(settings, publicUrl) {
@@ -311,12 +345,17 @@ $('channels').addEventListener('change', (e) => {
   save({ always_on: [...set] });
 });
 
-$('channels').addEventListener('click', (e) => {
+$('channels').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-remove]');
   if (!b) return;
   const code = b.closest('.ch').dataset.lang;
   const ch = A.status && A.status.channels.find((c) => c.lang === code);
-  if (ch && (ch.listeners || ch.streams) && !confirm(`${langCs(code)} právě poslouchá ${ch.listeners + ch.streams} lidí. Opravdu odebrat?`)) return;
+  const people = ch ? ch.listeners + ch.streams : 0;
+  if (people && !await ask({
+    title: 'Odebrat jazyk?',
+    body: `${langCs(code)} právě ${plural(people, 'poslouchá', 'poslouchají', 'poslouchá')} ${people} ${plural(people, 'člověk', 'lidé', 'lidí')}. Překlad jim okamžitě skončí.`,
+    ok: 'Odebrat jazyk',
+  })) return;
   save({ languages: A.settings.languages.filter((c) => c !== code) }, `${langCs(code)} odebrána`);
 });
 
@@ -369,27 +408,40 @@ $('qrFullBtn').addEventListener('click', () => {
   $('qrFull').hidden = false;
   document.documentElement.requestFullscreen?.().catch(() => {});
 });
-$('qrFull').addEventListener('click', () => {
+function closeQrFull() {
+  if ($('qrFull').hidden) return;
   $('qrFull').hidden = true;
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+$('qrFull').addEventListener('click', closeQrFull);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeQrFull(); });
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) closeQrFull(); });
+
+$('copyUrlBtn').hidden = !canCopy();
+$('copyUrlBtn').addEventListener('click', async () => {
+  if (await copyText($('publicUrlText').textContent)) toast('Adresa zkopírována');
+  else toast('Adresu se nepodařilo zkopírovat', true);
 });
 
 $('clearBtn').addEventListener('click', async () => {
+  if (!await ask({
+    title: 'Vymazat přepis?',
+    body: 'Posluchačům zmizí dosavadní text ve všech jazycích. Probíhající překlad pokračuje dál.',
+    ok: 'Vymazat přepis',
+  })) return;
   try { await api('POST', '/api/admin/clear'); toast('Přepis vymazán'); } catch (e) { toast(e.message, true); }
 });
 
 // ------------------------------------------------------------------ on air
 
-$('onairBtn').addEventListener('click', () => {
-  if (A.settings.on_air) $('confirmStop').showModal();
-  else save({ on_air: true }, 'Vysílání zahájeno');
-});
-$('confirmStopBtn').addEventListener('click', async () => {
-  $('confirmStop').close();
-  await save({ on_air: false }, 'Vysílání ukončeno');
-});
-$('confirmStop').addEventListener('click', (e) => {
-  if (e.target === $('confirmStop') || e.target.closest('[data-close]')) $('confirmStop').close();
+$('onairBtn').addEventListener('click', async () => {
+  if (!A.settings.on_air) { save({ on_air: true }, 'Vysílání zahájeno'); return; }
+  if (await ask({
+    title: 'Ukončit vysílání?',
+    body: 'Posluchači přestanou dostávat překlad a všechna spojení s Gemini se zavřou.',
+    ok: 'Ukončit vysílání',
+    cancel: 'Pokračovat ve vysílání',
+  })) await save({ on_air: false }, 'Vysílání ukončeno');
 });
 
 function renderHero(st) {
@@ -407,10 +459,10 @@ function renderHero(st) {
   $('heroSub').textContent = sub;
   $('statListeners').textContent = String(listeners);
   $('statLangs').textContent = String(liveLangs);
-  $('statListeners').nextSibling.textContent = ' ' + plural(listeners, 'posluchač', 'posluchači', 'posluchačů');
-  $('statLangs').nextSibling.textContent = ' ' + plural(liveLangs, 'jazyk překládá', 'jazyky překládají', 'jazyků překládá');
+  $('statListenersLabel').textContent = plural(listeners, 'posluchač', 'posluchači', 'posluchačů');
+  $('statLangsLabel').textContent = plural(liveLangs, 'jazyk překládá', 'jazyky překládají', 'jazyků překládá');
   const btn = $('onairBtn');
-  btn.textContent = on ? 'Ukončit vysílání' : 'Zahájit vysílání';
+  $('onairText').textContent = on ? 'Ukončit vysílání' : 'Zahájit vysílání';
   btn.classList.toggle('primary', !on);
   btn.classList.toggle('danger', on);
 }
@@ -471,7 +523,7 @@ function connectStatus() {
   if (A.ws) return;
   const ws = new WebSocket(proto + location.host + '/ws/admin');
   A.ws = ws;
-  ws.onopen = () => { $('conn').dataset.ok = 'true'; $('conn').textContent = 'Připojeno'; };
+  ws.onopen = () => { $('conn').dataset.ok = 'true'; $('connText').textContent = 'Připojeno'; };
   ws.onmessage = (e) => {
     const st = JSON.parse(e.data);
     A.status = st;
@@ -485,7 +537,7 @@ function connectStatus() {
     if (A.ws !== ws) return;
     A.ws = null;
     $('conn').dataset.ok = 'false';
-    $('conn').textContent = 'Bez spojení se serverem';
+    $('connText').textContent = 'Bez spojení se serverem';
     try {
       const s = await api('GET', '/api/admin/session');
       if (!s.authed) { showLogin(); return; }
@@ -516,7 +568,7 @@ async function listMics() {
 
 function setIngestUi() {
   const b = $('ingestBtn');
-  b.textContent = ING.active ? 'Přestat posílat zvuk' : 'Začít posílat zvuk';
+  $('ingestText').textContent = ING.active ? 'Přestat posílat zvuk' : 'Začít posílat zvuk';
   b.classList.toggle('primary', !ING.active);
   b.classList.toggle('danger', ING.active);
 }

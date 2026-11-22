@@ -1,11 +1,13 @@
 // Service worker: app shell offline, never touches live data.
-const VERSION = 'lt-1.0.1';
+const VERSION = 'lt-1.1.0';
 const SHELL = [
   '/',
   '/css/base.css',
   '/css/listener.css',
   '/js/listener.js',
   '/js/i18n.js',
+  '/js/ui.js',
+  '/js/theme.js',
   '/js/player.js',
   '/js/player-worklet.js',
   '/icons/icon.svg',
@@ -17,7 +19,7 @@ const SHELL = [
 ];
 const LIVE = /^\/(api|ws|stream|admin)(\/|$)|^\/healthz$/;
 // Operator console is online-only: always fetch its files fresh.
-const ADMIN = /^\/(css\/admin\.css|js\/(admin|theme|ingest-worklet)\.js)$/;
+const ADMIN = /^\/(css\/admin\.css|js\/(admin|ingest-worklet)\.js)$/;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

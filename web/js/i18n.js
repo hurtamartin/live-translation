@@ -20,6 +20,7 @@ const STR = {
     install: 'Install the app', installIos: 'In Safari, tap Share and then Add to Home Screen.',
     jump: 'Jump to latest', close: 'Close', unavailable: 'This language is no longer available.',
     resume: 'Tap play to resume audio',
+    copyLink: 'Copy link', copied: 'Link copied',
   },
   cs: {
     live: 'Živě', offAir: 'Nevysílá se', connecting: 'Připojuji…',
@@ -39,6 +40,7 @@ const STR = {
     install: 'Nainstalovat aplikaci', installIos: 'V Safari klepněte na Sdílet a pak na Přidat na plochu.',
     jump: 'Na nejnovější', close: 'Zavřít', unavailable: 'Tento jazyk už není k dispozici.',
     resume: 'Klepnutím na přehrát obnovíte zvuk',
+    copyLink: 'Kopírovat odkaz', copied: 'Odkaz zkopírován',
   },
   de: {
     live: 'Live', offAir: 'Keine Übertragung', connecting: 'Verbinde…',
@@ -58,6 +60,7 @@ const STR = {
     install: 'App installieren', installIos: 'Tippen Sie in Safari auf Teilen und dann auf Zum Home-Bildschirm.',
     jump: 'Zum Neuesten', close: 'Schließen', unavailable: 'Diese Sprache ist nicht mehr verfügbar.',
     resume: 'Zum Fortsetzen auf Play tippen',
+    copyLink: 'Link kopieren', copied: 'Link kopiert',
   },
   uk: {
     live: 'Наживо', offAir: 'Трансляції немає', connecting: 'Підключення…',
@@ -77,6 +80,7 @@ const STR = {
     install: 'Встановити застосунок', installIos: 'У Safari натисніть «Поділитися», а потім «На початковий екран».',
     jump: 'До найновішого', close: 'Закрити', unavailable: 'Ця мова більше недоступна.',
     resume: 'Натисніть «відтворити», щоб продовжити',
+    copyLink: 'Копіювати посилання', copied: 'Посилання скопійовано',
   },
   pl: {
     live: 'Na żywo', offAir: 'Brak transmisji', connecting: 'Łączenie…',
@@ -96,6 +100,7 @@ const STR = {
     install: 'Zainstaluj aplikację', installIos: 'W Safari dotknij Udostępnij, a potem Do ekranu początkowego.',
     jump: 'Do najnowszego', close: 'Zamknij', unavailable: 'Ten język nie jest już dostępny.',
     resume: 'Dotknij odtwórz, aby wznowić dźwięk',
+    copyLink: 'Kopiuj link', copied: 'Skopiowano link',
   },
   es: {
     live: 'En directo', offAir: 'Sin emisión', connecting: 'Conectando…',
@@ -115,6 +120,7 @@ const STR = {
     install: 'Instalar la app', installIos: 'En Safari, toca Compartir y luego Añadir a pantalla de inicio.',
     jump: 'Ir a lo último', close: 'Cerrar', unavailable: 'Este idioma ya no está disponible.',
     resume: 'Toca reproducir para reanudar el audio',
+    copyLink: 'Copiar enlace', copied: 'Enlace copiado',
   },
   fr: {
     live: 'En direct', offAir: 'Pas de diffusion', connecting: 'Connexion…',
@@ -134,6 +140,7 @@ const STR = {
     install: 'Installer l’app', installIos: 'Dans Safari, touchez Partager puis Sur l’écran d’accueil.',
     jump: 'Aller au plus récent', close: 'Fermer', unavailable: 'Cette langue n’est plus disponible.',
     resume: 'Touchez lecture pour reprendre l’audio',
+    copyLink: 'Copier le lien', copied: 'Lien copié',
   },
 };
 

@@ -1,5 +1,6 @@
 import { t, nativeName, localName, codeParts, uiLang } from './i18n.js';
 import { LivePlayer, StreamPlayer } from './player.js';
+import { toast as showToast, closeSheet, wireSheet, copyText, canCopy, haptic } from './ui.js';
 
 // ------------------------------------------------------------------ storage
 
@@ -10,17 +11,16 @@ const store = {
 
 const $ = (id) => document.getElementById(id);
 const el = {
-  title: $('title'), onair: $('onair'), onairText: $('onairText'), banner: $('banner'),
+  title: $('title'), onair: $('onair'), onairText: $('onairText'), banner: $('banner'), bannerText: $('bannerText'),
   feed: $('feed'), feedInner: $('feedInner'), empty: $('empty'), emptyTitle: $('emptyTitle'), emptyBody: $('emptyBody'),
-  jump: $('jump'), jumpText: $('jumpText'),
+  jump: $('jump'), jumpText: $('jumpText'), dock: $('dock'),
   channelBtn: $('channelBtn'), chCode: $('chCode'), chNative: $('chNative'), chSub: $('chSub'),
   play: $('play'), playLabel: $('playLabel'), settingsBtn: $('settingsBtn'), settingsLabel: $('settingsLabel'),
   langSheet: $('langSheet'), langTitle: $('langTitle'), langHint: $('langHint'), langList: $('langList'),
-  settingsSheet: $('settingsSheet'), sizes: $('sizes'), showSrc: $('showSrc'), bgMode: $('bgMode'),
+  settingsSheet: $('settingsSheet'), sizes: $('sizes'), sizePreview: $('sizePreview'), showSrc: $('showSrc'), bgMode: $('bgMode'),
   keepAwake: $('keepAwake'), awakeRow: $('awakeRow'), themes: $('themes'),
-  qr: $('qr'), shareUrl: $('shareUrl'), shareBtn: $('shareBtn'),
+  qr: $('qr'), shareUrl: $('shareUrl'), shareBtn: $('shareBtn'), copyBtn: $('copyBtn'),
   installGroup: $('installGroup'), installBtn: $('installBtn'), installIos: $('installIos'),
-  toast: $('toast'),
 };
 
 const SIZES = ['1.05rem', '1.3rem', '1.6rem', '1.95rem', '2.4rem'];
@@ -60,11 +60,13 @@ function applyStaticText() {
   $('themeLabel').textContent = t('theme');
   $('shareLabel').textContent = t('share');
   $('shareHint').textContent = t('shareHint');
-  el.shareBtn.textContent = t('shareBtn');
-  el.installBtn.textContent = t('install');
+  $('shareText').textContent = t('shareBtn');
+  $('copyText').textContent = t('copyLink');
+  $('installText').textContent = t('install');
   el.installIos.textContent = t('installIos');
   el.jumpText.textContent = t('jump');
-  for (const b of el.themes.querySelectorAll('button')) b.textContent = t(b.dataset.theme);
+  el.bannerText.textContent = t('reconnecting');
+  for (const b of el.themes.querySelectorAll('button')) b.querySelector('span').textContent = t(b.dataset.themeSet);
   for (const b of document.querySelectorAll('[data-close]')) b.setAttribute('aria-label', t('close'));
   SIZES.forEach((_, i) => {
     const b = document.createElement('button');
@@ -82,12 +84,7 @@ function applyPrefs() {
   const size = Math.min(SIZES.length - 1, Math.max(0, +store.get('size', 1)));
   document.documentElement.style.setProperty('--fs', SIZES[size]);
   for (const b of el.sizes.children) b.setAttribute('aria-pressed', String(+b.dataset.size === size));
-
-  const theme = store.get('theme', 'dark');
-  document.documentElement.dataset.theme = theme;
-  for (const b of el.themes.children) b.setAttribute('aria-pressed', String(b.dataset.theme === theme));
-  const dark = theme === 'dark' || (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
-  document.querySelector('meta[name="theme-color"]').content = dark ? '#10162B' : '#F1F3F9';
+  // The colour theme is applied and stored (key lt.theme) by theme.js before first paint.
 
   el.showSrc.checked = store.get('src', '0') === '1';
   document.body.classList.toggle('show-src', el.showSrc.checked);
@@ -204,9 +201,9 @@ function scrollToEnd() {
   el.jump.hidden = true;
 }
 
-function makeSeg(id) {
+function makeSeg(id, fresh = false) {
   const art = document.createElement('article');
-  art.className = 'seg';
+  art.className = fresh ? 'seg fresh' : 'seg';
   const tr = document.createElement('p');
   tr.className = 'tr';
   const src = document.createElement('p');
@@ -236,10 +233,19 @@ function onText(j) {
   if (!S.lang) return;
   const pinned = nearBottom();
   let seg = S.segs.get(j.s);
-  if (!seg) seg = makeSeg(j.s);
+  if (!seg) seg = makeSeg(j.s, true);
   appendText(j.k === 'tr' ? seg.tr : seg.src, j.x);
+  if (j.k === 'tr') showTyping();
   if (pinned) scrollToEnd(); else el.jump.hidden = false;
   if (!el.empty.hidden) render();
+}
+
+// The current sentence shows a pulsing dot while words keep arriving.
+let typingTimer = 0;
+function showTyping() {
+  el.feed.classList.add('typing');
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => el.feed.classList.remove('typing'), 1800);
 }
 
 function loadHistory(segs) {
@@ -274,7 +280,6 @@ function render() {
   el.onairText.textContent = onAir ? t('live') : t('offAir');
 
   el.banner.hidden = S.connected || !S.everConnected;
-  el.banner.textContent = t('reconnecting');
 
   // Channel readout
   if (S.lang) {
@@ -305,18 +310,20 @@ function render() {
   const hasText = S.segs.size > 0;
   el.empty.hidden = hasText;
   if (!hasText) {
-    let title, body;
-    if (!S.connected) { title = t('connecting'); body = ''; }
-    else if (!S.lang) { title = t('chooseLang'); body = t('chooseHint'); }
-    else if (!onAir) { title = t('offTitle'); body = t('offBody'); }
-    else if (S.chStatus === 'error') { title = t('errTitle'); body = t('errBody'); }
-    else if (S.chStatus === 'connecting' || S.chStatus === 'reconnecting') { title = t('startTitle'); body = t('startBody'); }
-    else { title = t('waitTitle'); body = t('waitBody'); }
+    let title, body, state;
+    if (!S.connected) { title = t('connecting'); body = ''; state = 'connecting'; }
+    else if (!S.lang) { title = t('chooseLang'); body = t('chooseHint'); state = 'choose'; }
+    else if (!onAir) { title = t('offTitle'); body = t('offBody'); state = 'off'; }
+    else if (S.chStatus === 'error') { title = t('errTitle'); body = t('errBody'); state = 'error'; }
+    else if (S.chStatus === 'connecting' || S.chStatus === 'reconnecting') { title = t('startTitle'); body = t('startBody'); state = 'starting'; }
+    else { title = t('waitTitle'); body = t('waitBody'); state = 'waiting'; }
     el.emptyTitle.textContent = title;
     el.emptyBody.textContent = body;
+    el.empty.dataset.state = state;
   }
 
   // Play button
+  el.dock.dataset.audio = S.audioState;
   el.play.dataset.state = S.audioState === 'paused' ? 'idle' : S.audioState;
   el.play.disabled = !S.lang || !audioAvailable();
   el.playLabel.textContent = S.audioState === 'idle' || S.audioState === 'paused' ? t('listen') : t('stop');
@@ -333,8 +340,9 @@ function renderLangList() {
     el.langList.append(li);
     return;
   }
-  for (const code of langs) {
+  for (const [i, code] of langs.entries()) {
     const li = document.createElement('li');
+    li.style.setProperty('--i', String(i));
     const b = document.createElement('button');
     b.type = 'button';
     b.dataset.lang = code;
@@ -384,7 +392,7 @@ function pickLang(code, close = true) {
     }
     subscribe();
   }
-  if (close && el.langSheet.open) el.langSheet.close();
+  if (close && el.langSheet.open) closeSheet(el.langSheet);
   updateMediaSession();
   render();
 }
@@ -424,7 +432,10 @@ async function startAudio() {
     if (mode === 'live') {
       const p = new LivePlayer({
         onLevel: (rms) => {
-          if (S.player === p) el.play.style.setProperty('--lvl', (1 + Math.min(0.22, rms * 2.2)).toFixed(3));
+          if (S.player !== p) return;
+          const lvl = Math.min(0.22, rms * 2.2);
+          el.play.style.setProperty('--lvl', (1 + lvl).toFixed(3));
+          el.dock.style.setProperty('--amp', (0.25 + lvl * 3.4).toFixed(3));
         },
         onState: (st) => { if (S.player === p && st !== 'running' && S.audioState !== 'idle') setAudioState('paused'); },
       });
@@ -457,12 +468,14 @@ function stopAudio(silent = false) {
   const wasLive = S.mode === 'live';
   S.mode = null;
   el.play.style.removeProperty('--lvl');
+  el.dock.style.removeProperty('--amp');
   if (wasLive) send({ t: 'audio', on: false });
   if (!silent) setAudioState('idle');
   else S.audioState = 'idle';
 }
 
 async function togglePlay() {
+  haptic();
   if (S.audioState === 'paused' && S.player) {
     try { await S.player.resume(); setAudioState('playing'); return; } catch { /* restart below */ }
   }
@@ -509,13 +522,13 @@ async function updateWakeLock() {
 
 // ------------------------------------------------------------------ misc UI
 
-let toastTimer = 0;
 function toast(text, error = false) {
-  el.toast.textContent = text;
-  el.toast.classList.toggle('error', error);
-  el.toast.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.toast.classList.remove('show'), 3200);
+  showToast(text, { error, ms: error ? 4500 : 3200 });
+}
+
+function sizePreviewText() {
+  const last = S.nowSeg && (S.nowSeg.tr.textContent || S.nowSeg.src.textContent);
+  return last || t('waitBody');
 }
 
 function openSettings() {
@@ -524,6 +537,8 @@ function openSettings() {
     el.qr.src = '/api/qr.svg';
   }
   el.shareBtn.hidden = !navigator.share;
+  el.copyBtn.hidden = !canCopy();
+  el.sizePreview.textContent = sizePreviewText();
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   el.installBtn.hidden = !S.installEvent;
@@ -542,14 +557,12 @@ el.feed.addEventListener('scroll', () => { if (nearBottom()) el.jump.hidden = tr
 
 el.langList.addEventListener('click', (e) => {
   const b = e.target.closest('button[data-lang]');
-  if (b) pickLang(b.dataset.lang);
+  if (!b) return;
+  haptic();
+  pickLang(b.dataset.lang);
 });
 
-for (const dlg of [el.langSheet, el.settingsSheet]) {
-  dlg.addEventListener('click', (e) => {
-    if (e.target === dlg || e.target.closest('[data-close]')) dlg.close();
-  });
-}
+for (const dlg of [el.langSheet, el.settingsSheet]) wireSheet(dlg);
 
 el.sizes.addEventListener('click', (e) => {
   const b = e.target.closest('button[data-size]');
@@ -560,18 +573,15 @@ el.sizes.addEventListener('click', (e) => {
   if (pinned) scrollToEnd();
 });
 
-el.themes.addEventListener('click', (e) => {
-  const b = e.target.closest('button[data-theme]');
-  if (!b) return;
-  store.set('theme', b.dataset.theme);
-  applyPrefs();
-});
-
 el.showSrc.addEventListener('change', () => { store.set('src', el.showSrc.checked ? '1' : '0'); applyPrefs(); });
 el.keepAwake.addEventListener('change', () => { store.set('awake', el.keepAwake.checked ? '1' : '0'); updateWakeLock(); });
 el.bgMode.addEventListener('change', () => {
   store.set('bg', el.bgMode.checked ? '1' : '0');
   if (S.audioState !== 'idle') startAudio();   // switch transport right away (inside this tap)
+});
+
+el.copyBtn.addEventListener('click', async () => {
+  if (await copyText(location.origin + '/')) { haptic(); toast(t('copied')); }
 });
 
 el.shareBtn.addEventListener('click', async () => {
@@ -597,8 +607,6 @@ document.addEventListener('visibilitychange', () => {
   }
   updateWakeLock();
 });
-
-matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyPrefs);
 
 // ------------------------------------------------------------------ boot
 
