@@ -51,7 +51,36 @@ body.admin { min-height: 100dvh; }
 }
 .conn { font-size: 0.85rem; color: var(--danger); }
 .conn[data-ok="true"] { color: var(--muted); }
-.top-actions { display: flex; gap: 8px; }
+.top-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.theme-switch { padding: 3px; gap: 2px; flex: none; }
+.theme-switch button {
+  flex: none;
+  width: 38px;
+  min-height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.theme-switch svg {
+  width: 18px; height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.theme-switch [data-theme-set="dark"] svg path { fill: currentColor; stroke: none; }
+.label-short { display: none; }
+
+/* Phones: actions get their own full-width row, theme switch left, buttons right. */
+@media (max-width: 560px) {
+  .top-actions { width: 100%; }
+  .theme-switch { margin-right: auto; }
+  .theme-switch button { width: 34px; }
+  .label-long { display: none; }
+  .label-short { display: inline; }
+}
 
 /* ---------- On-air hero ---------- */
 

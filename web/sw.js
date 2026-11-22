@@ -1,5 +1,5 @@
 // Service worker: app shell offline, never touches live data.
-const VERSION = 'lt-1.0.0';
+const VERSION = 'lt-1.0.1';
 const SHELL = [
   '/',
   '/css/base.css',
@@ -16,6 +16,8 @@ const SHELL = [
   '/manifest.webmanifest',
 ];
 const LIVE = /^\/(api|ws|stream|admin)(\/|$)|^\/healthz$/;
+// Operator console is online-only: always fetch its files fresh.
+const ADMIN = /^\/(css\/admin\.css|js\/(admin|theme|ingest-worklet)\.js)$/;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -32,7 +34,7 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (url.origin !== self.location.origin || LIVE.test(url.pathname)) return;
+  if (url.origin !== self.location.origin || LIVE.test(url.pathname) || ADMIN.test(url.pathname)) return;
 
   if (req.mode === 'navigate') {
     // Network first so a new version shows up immediately; cache when offline.
