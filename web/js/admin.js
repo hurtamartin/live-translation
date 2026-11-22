@@ -541,14 +541,17 @@ async function startIngest() {
     return;
   }
   const deviceId = $('micDevice').value;
+  // Mixer line input must stay untouched; a room mic needs the browser's echo
+  // canceller, otherwise translated audio from the speakers loops back in.
+  const room = $('micRoom').checked;
   try {
     ING.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         deviceId: deviceId ? { exact: deviceId } : undefined,
-        channelCount: { ideal: 2 },
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
+        channelCount: room ? { ideal: 1 } : { ideal: 2 },
+        echoCancellation: room,
+        noiseSuppression: room,
+        autoGainControl: room,
       },
     });
     await listMics();
@@ -559,7 +562,8 @@ async function startIngest() {
     ING.node = new AudioWorkletNode(ING.ctx, 'ingest', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
       channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'discrete',
-      processorOptions: { channel: parseInt($('micChannel').value, 10) },
+      // A processed (room) stream is mono: read channel 1 instead of halving it in a mix.
+      processorOptions: { channel: room ? 0 : parseInt($('micChannel').value, 10) },
     });
     const mute = ING.ctx.createGain();
     mute.gain.value = 0;
@@ -600,8 +604,15 @@ $('micDevice').addEventListener('change', () => {
   localStorage.setItem('lt.admin.mic', $('micDevice').value);
   if (ING.active) { stopIngest(); startIngest(); }
 });
+try { $('micRoom').checked = localStorage.getItem('lt.admin.micRoom') === '1'; } catch { /* private mode */ }
+$('micChannel').disabled = $('micRoom').checked;
+$('micRoom').addEventListener('change', () => {
+  $('micChannel').disabled = $('micRoom').checked;
+  try { localStorage.setItem('lt.admin.micRoom', $('micRoom').checked ? '1' : '0'); } catch { /* private mode */ }
+  if (ING.active) { stopIngest(); startIngest(); }
+});
 $('micChannel').addEventListener('change', () => {
-  if (ING.node) ING.node.port.postMessage({ channel: parseInt($('micChannel').value, 10) });
+  if (ING.node && !$('micRoom').checked) ING.node.port.postMessage({ channel: parseInt($('micChannel').value, 10) });
 });
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && ING.active && !ING.wake) {
