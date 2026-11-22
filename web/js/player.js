@@ -138,9 +138,10 @@ export class StreamPlayer {
     this.retry = 0;
     this.timer = 0;
     this.restartTimer = 0;
+    this.waitingSince = 0;
     const a = this.audio;
-    a.addEventListener('playing', () => { this.retry = 0; this.onState('playing'); });
-    a.addEventListener('waiting', () => this.onState('buffering'));
+    a.addEventListener('playing', () => { this.retry = 0; this.waitingSince = 0; this.onState('playing'); });
+    a.addEventListener('waiting', () => { this.waitingSince ||= performance.now(); this.onState('buffering'); });
     a.addEventListener('error', () => this._recover());
     a.addEventListener('ended', () => this._recover());
     a.addEventListener('pause', () => { if (this.active && !a.ended && a.error == null) this.onState('paused'); });
@@ -152,17 +153,34 @@ export class StreamPlayer {
     this.onState('buffering');
     this.audio.src = this.url + '?t=' + Date.now();
     clearInterval(this.timer);
-    this.timer = setInterval(() => this._catchUp(), 2000);
+    this.timer = setInterval(() => this._watch(), 1000);
     await this.audio.play();
   }
 
-  _catchUp() {
+  // Keeps latency in check without seeking. Seeking to the live edge empties the
+  // buffer and stalls playback, and phones then rebuffer and lag again, so the
+  // stream ended up playing in fragments. Instead play slightly faster while
+  // behind (pitch is preserved), and only reload the stream after a long lag.
+  _watch() {
     const a = this.audio;
-    if (!this.active || !a.buffered.length) return;
-    const end = a.buffered.end(a.buffered.length - 1);
-    if (end - a.currentTime > 3) {
-      try { a.currentTime = end - 0.6; } catch { /* not seekable */ }
+    if (!this.active) return;
+    if (this.waitingSince && performance.now() - this.waitingSince > 12000) {
+      this.waitingSince = 0;
+      this._recover();
+      return;
     }
+    if (!a.buffered.length || a.paused) return;
+    const lag = a.buffered.end(a.buffered.length - 1) - a.currentTime;
+    if (lag > 15) { this._reload(); return; }
+    // Hysteresis: speed up above 3 s, back to normal once under 2 s (Wi-Fi safety margin).
+    const rate = lag > 5 ? 1.1 : lag > 3 ? 1.05 : lag < 2 ? 1 : a.playbackRate;
+    if (a.playbackRate !== rate) a.playbackRate = rate;
+  }
+
+  _reload() {
+    this.audio.playbackRate = 1;
+    this.audio.src = this.url + '?t=' + Date.now();
+    this.audio.play().catch(() => this.onState('paused'));
   }
 
   _recover() {
@@ -170,19 +188,12 @@ export class StreamPlayer {
     this.onState('buffering');
     clearTimeout(this.restartTimer);
     const delay = Math.min(1000 * 2 ** this.retry++, 10000);
-    this.restartTimer = setTimeout(() => {
-      if (!this.active) return;
-      this.audio.src = this.url + '?t=' + Date.now();
-      this.audio.play().catch(() => this.onState('paused'));
-    }, delay);
+    this.restartTimer = setTimeout(() => { if (this.active) this._reload(); }, delay);
   }
 
   setUrl(url) {
     this.url = url;
-    if (this.active) {
-      this.audio.src = url + '?t=' + Date.now();
-      this.audio.play().catch(() => this.onState('paused'));
-    }
+    if (this.active) this._reload();
   }
 
   get state() { return this.active && !this.audio.paused ? 'running' : 'suspended'; }
