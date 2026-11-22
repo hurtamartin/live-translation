@@ -1,0 +1,6 @@
+aiohttp>=3.10,<4
+numpy>=2.0,<3
+soxr>=0.5,<2
+sounddevice>=0.5,<1
+segno>=1.6,<2
+uvloop>=0.21; sys_platform != "win32"

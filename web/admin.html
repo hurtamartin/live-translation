@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="cs" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Řízení překladu</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#10162B">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/admin.css">
+<script type="module" src="/js/admin.js"></script>
+</head>
+<body class="admin">
+
+<!-- ================= Login ================= -->
+<main class="login" id="login" hidden>
+  <form class="login-card" id="loginForm">
+    <svg class="logo" viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="112" fill="#10162B"/><circle cx="183" cy="256" r="46" fill="#F5B83D"/><path d="M253.7 171.7A110 110 0 0 1 253.7 340.3M295.5 121.9A175 175 0 0 1 295.5 390.1" fill="none" stroke="#F5B83D" stroke-width="34" stroke-linecap="round"/></svg>
+    <h1>Řízení překladu</h1>
+    <label class="field">
+      <span>Heslo správce</span>
+      <input type="password" id="password" autocomplete="current-password" required>
+    </label>
+    <p class="form-error" id="loginError" role="alert" hidden></p>
+    <button type="submit" class="btn primary">Přihlásit se</button>
+  </form>
+</main>
+
+<!-- ================= Console ================= -->
+<div class="console" id="console" hidden>
+  <header class="a-top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="112" fill="#10162B"/><circle cx="183" cy="256" r="46" fill="#F5B83D"/><path d="M253.7 171.7A110 110 0 0 1 253.7 340.3M295.5 121.9A175 175 0 0 1 295.5 390.1" fill="none" stroke="#F5B83D" stroke-width="34" stroke-linecap="round"/></svg>
+      <span id="brandTitle">Řízení překladu</span>
+    </div>
+    <span class="conn" id="conn" data-ok="false">Bez spojení se serverem</span>
+    <div class="top-actions">
+      <a class="btn ghost" href="/" target="_blank" rel="noopener">Stránka posluchačů</a>
+      <button type="button" class="btn ghost" id="logout">Odhlásit</button>
+    </div>
+  </header>
+
+  <section class="hero" id="hero" data-on="false">
+    <div class="hero-text">
+      <p class="hero-state" id="heroState">Nevysílá se</p>
+      <p class="hero-sub" id="heroSub">Posluchači vidí, že vysílání ještě nezačalo.</p>
+    </div>
+    <div class="hero-stats">
+      <span><b id="statListeners">0</b> posluchačů</span>
+      <span><b id="statLangs">0</b> jazyků překládá</span>
+    </div>
+    <button type="button" class="btn primary big" id="onairBtn">Zahájit vysílání</button>
+  </section>
+
+  <main class="grid">
+    <!-- ---------- Signal ---------- -->
+    <section class="card" aria-labelledby="hSignal">
+      <h2 id="hSignal">Vstupní signál</h2>
+      <div class="meter" id="meter" aria-hidden="true">
+        <i class="meter-fill" id="meterFill"></i>
+        <i class="meter-peak" id="meterPeak"></i>
+        <i class="meter-thr" id="meterThr"></i>
+      </div>
+      <div class="meter-scale" aria-hidden="true"><span>−60</span><span>−48</span><span>−36</span><span>−24</span><span>−12</span><span>0 dB</span></div>
+      <div class="sig-status">
+        <span class="chip" id="gateChip" data-tone="idle">Ticho</span>
+        <span class="src-detail" id="srcDetail"></span>
+      </div>
+      <p class="src-error" id="srcError" hidden></p>
+
+      <label class="field">
+        <span>Zdroj zvuku</span>
+        <select id="source" data-key="source">
+          <option value="device">Zvuková karta serveru (USB z mixpultu)</option>
+          <option value="browser">Prohlížeč na tomto počítači</option>
+          <option value="file">WAV soubor ve složce data (zkouška)</option>
+          <option value="none">Vypnuto</option>
+        </select>
+      </label>
+
+      <div class="src-panel" data-src="device">
+        <div class="field-row">
+          <label class="field grow">
+            <span>Zařízení</span>
+            <select id="device" data-key="device"></select>
+          </label>
+          <label class="field">
+            <span>Kanál</span>
+            <select id="channel" data-key="channel" data-type="int"></select>
+          </label>
+          <button type="button" class="icon-btn" id="refreshDevices" title="Znovu načíst zařízení" aria-label="Znovu načíst zařízení">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="src-panel" data-src="browser">
+        <p class="hint" id="secureHint" hidden>Prohlížeč pustí mikrofon jen přes https nebo na adrese localhost.</p>
+        <div class="field-row">
+          <label class="field grow">
+            <span>Vstup tohoto počítače</span>
+            <select id="micDevice"></select>
+          </label>
+          <label class="field">
+            <span>Kanál</span>
+            <select id="micChannel">
+              <option value="-1">Mix L+R</option>
+              <option value="0">1 (L)</option>
+              <option value="1">2 (R)</option>
+            </select>
+          </label>
+        </div>
+        <button type="button" class="btn primary" id="ingestBtn">Začít posílat zvuk</button>
+        <p class="hint">Nechte tuto stránku otevřenou po celou dobu vysílání.</p>
+      </div>
+
+      <div class="src-panel" data-src="file">
+        <label class="field">
+          <span>Soubor</span>
+          <select id="file_path" data-key="file_path"></select>
+        </label>
+        <p class="hint">16bitový WAV nahrajte do složky data (svazek /data). Přehrává se ve smyčce.</p>
+      </div>
+
+      <label class="field">
+        <span>Zesílení <output id="gainOut"></output></span>
+        <input type="range" id="gain_db" data-key="gain_db" data-type="float" min="-24" max="24" step="1">
+      </label>
+      <label class="switch-row">
+        <span>Šumová brána<small>V tichu se do Google nic neposílá. Šetří peníze i kvótu.</small></span>
+        <input type="checkbox" class="switch" id="gate_enabled" data-key="gate_enabled" role="switch">
+      </label>
+      <div class="gate-fields" id="gateFields">
+        <label class="field">
+          <span>Práh <output id="thrOut"></output></span>
+          <input type="range" id="gate_threshold_db" data-key="gate_threshold_db" data-type="float" min="-80" max="-10" step="1">
+        </label>
+        <label class="field">
+          <span>Doběh po ztichnutí <output id="holdOut"></output></span>
+          <input type="range" id="gate_hold_ms" data-key="gate_hold_ms" data-type="int" min="300" max="5000" step="100">
+        </label>
+      </div>
+    </section>
+
+    <!-- ---------- Languages ---------- -->
+    <section class="card" aria-labelledby="hLangs">
+      <h2 id="hLangs">Jazyky překladu</h2>
+      <p class="hint">Každý jazyk je samostatné spojení s Gemini. Spouští se, až se připojí první posluchač, a po chvíli bez posluchačů se samo ukončí.</p>
+      <ul class="channels" id="channels"></ul>
+      <div class="field-row add-lang">
+        <label class="field grow">
+          <span>Přidat jazyk</span>
+          <select id="addLang"></select>
+        </label>
+        <button type="button" class="btn" id="addLangBtn">Přidat</button>
+      </div>
+      <label class="field">
+        <span>Ukončit relaci bez posluchačů po <output id="idleOut"></output></span>
+        <input type="range" id="idle_stop_s" data-key="idle_stop_s" data-type="int" min="0" max="600" step="15">
+      </label>
+    </section>
+
+    <!-- ---------- Invite ---------- -->
+    <section class="card" aria-labelledby="hInvite">
+      <h2 id="hInvite">Pozvánka pro posluchače</h2>
+      <div class="invite">
+        <img id="qr" alt="QR kód s adresou pro posluchače" width="148" height="148">
+        <div class="invite-side">
+          <code id="publicUrlText"></code>
+          <button type="button" class="btn" id="qrFullBtn">Promítnout QR kód</button>
+        </div>
+      </div>
+      <p class="warn" id="localhostWarn" hidden>Adresa obsahuje localhost. Telefony ji neotevřou: vyplňte veřejnou adresu serveru v síti.</p>
+      <label class="field">
+        <span>Veřejná adresa</span>
+        <input type="url" id="public_url" data-key="public_url" placeholder="https://preklad.example.cz/" inputmode="url" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Název akce</span>
+        <input type="text" id="event_title" data-key="event_title" maxlength="80">
+      </label>
+    </section>
+
+    <!-- ---------- Gemini ---------- -->
+    <section class="card" aria-labelledby="hGemini">
+      <h2 id="hGemini">Překladový model</h2>
+      <label class="field">
+        <span>API klíč Gemini <small id="keyState"></small></span>
+        <input type="password" id="api_key" data-key="api_key" autocomplete="off" spellcheck="false" placeholder="Vložte klíč z Google AI Studia">
+      </label>
+      <label class="field">
+        <span>Model</span>
+        <input type="text" id="model" data-key="model" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Pokyny pro překlad <small>terminologie, oslovení, názvy, které se nepřekládají</small></span>
+        <textarea id="system_instruction" data-key="system_instruction" rows="4" maxlength="4000" placeholder="Např.: Překládej formálně a vykej. Názvy produktů nepřekládej."></textarea>
+      </label>
+      <label class="switch-row">
+        <span>Opakovat řeč, která už je v cílovém jazyce<small>Vypnuto: model mlčí, když řečník mluví jazykem posluchače.</small></span>
+        <input type="checkbox" class="switch" id="echo_target" data-key="echo_target" role="switch">
+      </label>
+      <button type="button" class="btn ghost" id="clearBtn">Vymazat přepis u posluchačů</button>
+    </section>
+
+    <!-- ---------- Log ---------- -->
+    <section class="card wide" aria-labelledby="hLog">
+      <h2 id="hLog">Záznam událostí</h2>
+      <ol class="log" id="log"></ol>
+    </section>
+  </main>
+</div>
+
+<!-- ================= Projected QR ================= -->
+<div class="qr-full" id="qrFull" hidden>
+  <div class="qr-full-inner">
+    <p class="qr-full-title" id="qrFullTitle"></p>
+    <img id="qrFullImg" alt="QR kód s adresou pro posluchače">
+    <p class="qr-full-url" id="qrFullUrl"></p>
+    <p class="qr-full-hint">Naskenujte kód a vyberte svůj jazyk. Klepnutím zavřete.</p>
+  </div>
+</div>
+
+<dialog class="sheet confirm" id="confirmStop" aria-labelledby="confirmTitle">
+  <div class="sheet-head"><h2 id="confirmTitle">Ukončit vysílání?</h2></div>
+  <div class="sheet-body">
+    <p>Posluchači přestanou dostávat překlad a všechna spojení s Gemini se zavřou.</p>
+    <div class="confirm-actions">
+      <button type="button" class="btn ghost" value="cancel" data-close>Pokračovat ve vysílání</button>
+      <button type="button" class="btn danger" id="confirmStopBtn">Ukončit vysílání</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

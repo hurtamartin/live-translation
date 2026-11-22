@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Živý překlad</title>
+<meta name="description" content="Live translation on your phone: read and listen.">
+<meta name="theme-color" content="#10162B">
+<meta name="color-scheme" content="dark light">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="preload" href="/fonts/barlow-condensed-600-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/listener.css">
+<script type="module" src="/js/listener.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <h1 id="title">Živý překlad</h1>
+  <span class="onair" id="onair" data-state="off"><i aria-hidden="true"></i><span id="onairText"></span></span>
+</header>
+
+<div class="banner" id="banner" role="status" hidden></div>
+
+<main class="feed" id="feed" aria-live="polite" aria-relevant="additions text">
+  <div class="feed-inner" id="feedInner"></div>
+  <div class="empty" id="empty">
+    <p class="empty-title" id="emptyTitle"></p>
+    <p class="empty-body" id="emptyBody"></p>
+  </div>
+</main>
+
+<button type="button" class="jump" id="jump" hidden>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <span id="jumpText"></span>
+</button>
+
+<nav class="dock" aria-label="Player">
+  <div class="dock-inner">
+    <button type="button" class="channel" id="channelBtn" aria-haspopup="dialog">
+      <span class="code" id="chCode">··</span>
+      <span class="names">
+        <span class="native" id="chNative"></span>
+        <span class="sub" id="chSub"></span>
+      </span>
+    </button>
+    <button type="button" class="play" id="play" data-state="idle">
+      <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+      <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/></svg>
+      <span class="ring" aria-hidden="true"></span>
+      <span class="visually-hidden" id="playLabel"></span>
+    </button>
+    <button type="button" class="icon-btn" id="settingsBtn" aria-haspopup="dialog">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="17" r="2.3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      <span class="visually-hidden" id="settingsLabel"></span>
+    </button>
+  </div>
+</nav>
+
+<dialog class="sheet" id="langSheet" aria-labelledby="langTitle">
+  <div class="sheet-head">
+    <h2 id="langTitle"></h2>
+    <button type="button" class="icon-btn" data-close aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="sheet-body">
+    <p id="langHint"></p>
+    <ul class="lang-list" id="langList"></ul>
+  </div>
+</dialog>
+
+<dialog class="sheet" id="settingsSheet" aria-labelledby="settingsTitle">
+  <div class="sheet-head">
+    <h2 id="settingsTitle"></h2>
+    <button type="button" class="icon-btn" data-close aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="sheet-body">
+    <section class="set-group">
+      <h3 id="sizeLabel"></h3>
+      <div class="segmented sizes" id="sizes" role="group" aria-labelledby="sizeLabel"></div>
+    </section>
+    <section class="set-group">
+      <label class="switch-row"><span id="srcLabel"></span><input type="checkbox" class="switch" id="showSrc" role="switch"></label>
+      <label class="switch-row"><span><span id="bgLabel"></span><small id="bgHint"></small></span><input type="checkbox" class="switch" id="bgMode" role="switch"></label>
+      <label class="switch-row" id="awakeRow"><span id="awakeLabel"></span><input type="checkbox" class="switch" id="keepAwake" role="switch"></label>
+    </section>
+    <section class="set-group">
+      <h3 id="themeLabel"></h3>
+      <div class="segmented" id="themes" role="group" aria-labelledby="themeLabel">
+        <button type="button" data-theme="dark"></button>
+        <button type="button" data-theme="light"></button>
+        <button type="button" data-theme="auto"></button>
+      </div>
+    </section>
+    <section class="set-group share">
+      <h3 id="shareLabel"></h3>
+      <p id="shareHint"></p>
+      <div class="share-row">
+        <img id="qr" alt="" width="132" height="132">
+        <div class="share-side">
+          <code id="shareUrl"></code>
+          <button type="button" class="btn" id="shareBtn" hidden></button>
+        </div>
+      </div>
+    </section>
+    <section class="set-group" id="installGroup" hidden>
+      <button type="button" class="btn primary" id="installBtn"></button>
+      <p class="install-ios" id="installIos" hidden></p>
+    </section>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -1,0 +1,145 @@
+# Živý překlad
+
+Signál z mixpultu jde na server v Dockeru, ten ho posílá do modelu Gemini Live Translate
+(`gemini-3.5-live-translate-preview`) a posluchačům na telefony rozesílá přeložený **text i zvuk**.
+Telefony nepotřebují žádný API klíč ani instalaci: stačí naskenovat QR kód. Webovou aplikaci
+lze přidat na plochu jako PWA.
+
+```
+ mixpult ──USB──▶ ┌──────────────── Docker: live-translation ─────────────────┐
+                  │ zdroj zvuku ─▶ šumová brána ─▶ 16 kHz PCM (jednou)         │
+ (nebo prohlížeč  │                                   │                        │
+  operátora,      │             ┌─────────────────────┼──────────────┐         │
+  nebo WAV)       │             ▼                     ▼              ▼         │
+                  │      Gemini relace EN      Gemini relace DE    …  (wss)   │
+                  │             │ text + 24 kHz zvuk                          │
+                  │             ▼                                             │
+                  │   kanál: přepis + takt 40 ms ─▶ Opus (1× kódováno)  ──────┼─▶ WebSocket ─▶ telefony
+                  │                              └▶ MP3 (jen když poslouchá)──┼─▶ /stream/xx.mp3
+                  └───────────────────────────────────────────────────────────┘
+```
+
+## Rychlý start
+
+```bash
+cp .env.example .env          # vyplňte GEMINI_API_KEY a ADMIN_PASSWORD
+docker compose up -d --build
+```
+
+- Posluchači: `http://<server>:8080/`
+- Operátor: `http://<server>:8080/admin`
+
+Bez `ADMIN_PASSWORD` se heslo vygeneruje a vypíše do logu (`docker compose logs translator`).
+API klíč lze zadat i v administraci; uloží se do svazku `/data` (soubor `settings.json`, práva 600).
+
+## Odkud server bere zvuk
+
+| Zdroj | Kdy použít | Nastavení |
+|---|---|---|
+| **Zvuková karta serveru** | Server s Linuxem, USB rozhraní mixpultu zapojené do serveru | `docker compose -f docker-compose.yml -f docker-compose.alsa.yml up -d` a v administraci vyberte zařízení a kanál (mono kanál z vícekanálového rozhraní, např. 3 = AUX send pro překlad). |
+| **Prohlížeč operátora** | Docker Desktop na Windows/macOS (USB zvuk se do kontejneru nepředá), nebo mixpult připojený k jinému počítači | V administraci zvolte „Prohlížeč na tomto počítači“, vyberte vstup a kanál (L/R/mix) a klikněte „Začít posílat zvuk“. Stránka musí zůstat otevřená. Prohlížeč pustí vstup jen přes `https` nebo `localhost`. |
+| **WAV soubor** | Zkouška bez mixpultu | 16bitový WAV nahrajte do svazku `/data` (`docker cp nahravka.wav live-translation:/data/`). |
+
+Zpracování zvuku z mixpultu je bez echo cancelling, AGC a potlačení šumu: mixpult dodává čistý linkový signál.
+Nejlepší je poslat do serveru samostatný AUX/matrix výstup jen s řečníky (bez hudby).
+
+## HTTPS: proč a jak
+
+Na prostém `http://` přes IP adresu prohlížeč zakáže AudioWorklet, WebCodecs, service worker,
+instalaci PWA i Wake Lock. Aplikace to zvládne (telefon automaticky přepne na MP3 stream
+a text funguje), ale plnou kvalitu dává až HTTPS:
+
+```bash
+# .env: DOMAIN=preklad.example.cz  (A záznam míří na server, porty 80/443 otevřené)
+docker compose --profile https up -d --build
+```
+
+Caddy si sám obstará certifikát Let's Encrypt (`deploy/Caddyfile`). V uzavřené síti sálu použijte
+doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte **Veřejnou adresu**
+(z ní se generuje QR kód).
+
+## Jak se poslouchá
+
+- **Nízké zpoždění (výchozí):** Opus rámce přes WebSocket, dekódování WebCodecs, přehrávání přes
+  AudioWorklet s jitter bufferem 160 ms, který se při nahromadění sám dorovná (max 1,2 s).
+- **Se zamčenou obrazovkou:** přepínač v nastavení posluchače. Klasický `<audio>` MP3 stream,
+  hraje i v kapse (iOS jinak Web Audio na pozadí uspí). Zpoždění je o něco vyšší.
+- Text se zobrazuje průběžně po větách, aktuální věta je zvýrazněná, volitelně i původní znění.
+- Jazyk rozhraní se řídí jazykem telefonu (cs, en, de, uk, pl, es, fr), názvy jazyků se zobrazují
+  v jejich vlastní podobě (Deutsch, Українська…).
+- `/?lang=de` otevře rovnou daný jazyk: hodí se pro QR kódy vytištěné pro jednotlivé jazyky.
+
+## Optimalizace
+
+| Co | Proč |
+|---|---|
+| Žádný PyTorch (prototyp `capture.py` ho používal) | Převzorkování přes `soxr`, VAD nahrazen šumovou bránou. Image cca 265 MB místo několika GB. |
+| Šumová brána s předstihem 300 ms a doběhem | V tichu se do Google nic neposílá: nižší cena i kvóta, první slabika se neusekne. |
+| Relace na vyžádání | Jazyk se připojí ke Gemini až s prvním posluchačem a po nastavené době bez posluchačů se odpojí. „Stále zapnuto“ jen pro hlavní jazyk. |
+| Kódování jednou pro všechny | Zpráva pro Gemini se sestaví jednou pro všechny jazyky, Opus/MP3 se kóduje jednou na jazyk a stejné bajty jdou všem posluchačům. |
+| Opus ~20 kbps místo PCM 384 kbps | Na Wi-Fi v sále unese stovky telefonů (200 posluchačů ≈ 4–5 Mbit/s). |
+| Fronty na posluchače | Pomalý telefon zahazuje staré rámce, ostatní nebrzdí. |
+| Plynulé předání relace | Na `goAway` od Google se otevře nová relace dřív, než stará skončí: překlad nevypadne. |
+| Statika | Předkomprimované `.gz`, self-hostovaný font (žádné volání Google Fonts z telefonů), service worker. |
+
+## Konfigurace (proměnné prostředí)
+
+| Proměnná | Výchozí | Popis |
+|---|---|---|
+| `GEMINI_API_KEY` | – | Klíč z Google AI Studia. Má přednost před klíčem z administrace. |
+| `ADMIN_PASSWORD` | vygenerováno | Heslo do `/admin`. |
+| `HTTP_PORT` | `8080` | Port na hostiteli. |
+| `DOMAIN` | – | Doména pro profil `https`. |
+| `MAX_CLIENTS` | `1000` | Strop současných posluchačů. |
+| `TRUST_PROXY` | `1` | Věřit hlavičkám `X-Forwarded-*` od reverzní proxy. |
+| `LOG_LEVEL` | `INFO` | Úroveň logování. |
+| `GEMINI_WS_URL` | Google v1beta | Jen pro testy (mock server). |
+
+Vše ostatní (jazyky, zdroj, brána, pokyny pro překlad, název akce) se nastavuje v administraci
+a ukládá do `/data/settings.json`. Stav „vysílá se“ se pamatuje i přes restart kontejneru.
+
+## Vývoj bez API klíče
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r server/requirements.txt
+python tools/mock_gemini.py 9100 &
+cd server && GEMINI_WS_URL=ws://127.0.0.1:9100/ws GEMINI_API_KEY=test DATA_DIR=../data python -m app
+```
+
+Mock odpovídá na každou sekundu zvuku kouskem přepisu, „překladu“ a tónem. `MOCK_GOAWAY_S=5`
+otestuje předávání relací, klíč `bad` chybu autentizace. Opus/MP3 vyžadují `libopus` a `libmp3lame`
+(v Dockeru jsou); bez nich server běží, jen bez zvuku pro telefony.
+
+Ikony: `python tools/make_icons.py`.
+
+## Struktura
+
+```
+server/app/
+  main.py, web.py        HTTP, WebSockety, administrace, QR, manifest
+  engine.py              vstup -> brána -> rozesílání do jazyků
+  channel.py             jeden jazyk: relace Gemini, přepis, takt zvuku, Opus/MP3
+  gemini.py              WebSocket klient Gemini Live
+  audio/sources.py       zvuková karta (PortAudio/ALSA), prohlížeč, WAV
+  audio/codecs.py        ctypes vazby na libopus a libmp3lame
+web/
+  index.html, js/listener.js, js/player*.js   aplikace pro posluchače (PWA)
+  admin.html, js/admin.js, js/ingest-worklet.js   konzole operátora
+```
+
+## Bezpečnost a provoz
+
+- API klíč zůstává na serveru, telefony ho nikdy nevidí.
+- Administrace: heslo, HttpOnly + SameSite=Strict cookie, omezení pokusů o přihlášení.
+- Kontejner běží jako neprivilegovaný uživatel, read-only filesystem, bez capabilities.
+- Přeložený obsah jde do Google (Gemini API). Ověřte, že to odpovídá pravidlům akce a GDPR
+  (informujte účastníky, že se řeč zpracovává AI službou).
+- Přepis se drží jen v paměti (posledních 80 bloků na jazyk), na disk se neukládá.
+  Tlačítko „Vymazat přepis u posluchačů“ ho smaže.
+
+## Omezení
+
+- Model je ve fázi preview: názvy polí a limity se mohou změnit. Server umí sám přesunout pole
+  nastavení, pokud je Google odmítne, a model lze změnit v administraci.
+- Každý jazyk je samostatná placená relace.
+- Současně běží jeden zdroj zvuku.

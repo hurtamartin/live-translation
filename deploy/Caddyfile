@@ -1,0 +1,12 @@
+# HTTPS in front of the translator (docker compose --profile https up -d).
+# Caddy gets a Let's Encrypt certificate for $DOMAIN automatically; the domain
+# must point to this server and ports 80/443 must be reachable for the challenge.
+# On a closed venue network, use a DNS challenge or your own certificate instead.
+
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy translator:8080 {
+		# Audio streams and WebSockets must not be buffered.
+		flush_interval -1
+	}
+}

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data/
+**/__pycache__/
+**/*.pyc
+*.md
+!README.md
+docker-compose*.yml
+deploy/
+tools/
+capture.py
+index.html
+.vscode/
+.idea/

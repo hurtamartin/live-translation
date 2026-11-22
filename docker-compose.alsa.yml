@@ -1,0 +1,13 @@
+# Linux host only: give the container the host's sound cards (USB interface of the mixer).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.alsa.yml up -d --build
+#
+# If the device cannot be opened, check the host's audio group id
+# (`getent group audio`) and put the number in group_add.
+
+services:
+  translator:
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio

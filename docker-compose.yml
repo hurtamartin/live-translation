@@ -1,0 +1,56 @@
+# Basic setup: http://<server>:8080 for listeners, /admin for the operator.
+#
+#   docker compose up -d --build
+#
+# Sound card on a Linux host:   add  -f docker-compose.alsa.yml
+# HTTPS with your own domain:   add  --profile https  (see deploy/Caddyfile)
+
+services:
+  translator:
+    build: .
+    image: live-translation:latest
+    container_name: live-translation
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Europe/Prague}
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - translator-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on:
+      - translator
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  translator-data:
+  caddy-data:
+  caddy-config:
