@@ -34,5 +34,7 @@ def run() -> None:
 
     log.info("Live translation %s listening on http://%s:%d (admin: /admin)",
              __version__, env.host, env.port)
+    # backlog: when the QR code goes up, hundreds of phones connect within seconds;
+    # the default of 128 pending connections would make some of them retry (1 s+).
     web.run_app(app, host=env.host, port=env.port, access_log=None, print=None,
-                loop=loop, shutdown_timeout=5)
+                loop=loop, shutdown_timeout=5, backlog=1024)

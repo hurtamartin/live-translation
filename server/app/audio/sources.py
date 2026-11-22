@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import wave
 from pathlib import Path
@@ -26,11 +27,26 @@ log = logging.getLogger(__name__)
 TARGET_RATE = 16000
 Sink = Callable[[np.ndarray], None]
 
+# PortAudio is not thread-safe for (re)initialisation: Pa_Terminate() while another
+# thread opens or queries a stream can crash the whole process. Every call that
+# touches the library state goes through this lock (they all run in worker threads).
+_pa_lock = threading.Lock()
+_open_streams = 0  # guarded by _pa_lock; no re-scan while a stream is open
+
 
 def _sd():
     import sounddevice  # imported lazily: needs libportaudio2
 
     return sounddevice
+
+
+def _rescan(sd) -> bool:
+    """Re-enumerate devices so a re-plugged USB interface shows up. Lock held."""
+    if _open_streams:
+        return False
+    sd._terminate()
+    sd._initialize()
+    return True
 
 
 def _default_input(sd) -> int:
@@ -47,13 +63,14 @@ def _default_input(sd) -> int:
 def list_devices(refresh: bool = False) -> list[dict]:
     try:
         sd = _sd()
-        if refresh:
-            sd._terminate()
-            sd._initialize()
-        default_in = _default_input(sd)
-        apis = sd.query_hostapis()
+        with _pa_lock:
+            if refresh:
+                _rescan(sd)
+            default_in = _default_input(sd)
+            apis = sd.query_hostapis()
+            devices = sd.query_devices()
         out = []
-        for i, d in enumerate(sd.query_devices()):
+        for i, d in enumerate(devices):
             if d["max_input_channels"] > 0:
                 out.append({
                     "index": i,
@@ -130,18 +147,23 @@ class DeviceSource(Source):
                 return i, d
         raise RuntimeError("Server nevidí žádnou zvukovou kartu se vstupem.")
 
+    def _prepare(self, rescan: bool) -> tuple[int, dict]:
+        sd = _sd()
+        with _pa_lock:
+            if rescan:
+                _rescan(sd)
+            return self._resolve(sd)
+
     async def _supervise(self) -> None:
         loop = asyncio.get_running_loop()
         attempt = 0
+        last_error = ""
         while True:
             stream = None
             try:
                 self.state = "starting"
                 sd = _sd()
-                if attempt:
-                    # Re-scan so a re-plugged USB interface shows up again.
-                    await asyncio.to_thread(lambda: (sd._terminate(), sd._initialize()))
-                idx, info = self._resolve(sd)
+                idx, info = await asyncio.to_thread(self._prepare, attempt > 0)
                 native = int(info["default_samplerate"])
                 max_ch = int(info["max_input_channels"])
                 ch = self.channel if self.channel < max_ch else 0
@@ -162,11 +184,19 @@ class DeviceSource(Source):
                     loop.call_soon_threadsafe(put, indata[:, ch].copy())
 
                 def open_stream():
-                    s = sd.InputStream(device=idx, channels=ch + 1, samplerate=native,
-                                       dtype="float32", blocksize=max(256, native // 20),
-                                       latency="high", callback=callback)
-                    s.start()
-                    return s
+                    global _open_streams
+                    with _pa_lock:
+                        s = sd.InputStream(device=idx, channels=ch + 1, samplerate=native,
+                                           dtype="float32", blocksize=max(256, native // 20),
+                                           latency="high", callback=callback)
+                        _open_streams += 1
+                        try:
+                            s.start()
+                        except BaseException:
+                            _open_streams -= 1
+                            s.close()
+                            raise
+                        return s
 
                 stream = await asyncio.to_thread(open_stream)
                 self.state = "running"
@@ -174,6 +204,7 @@ class DeviceSource(Source):
                 self.detail = f"{info['name']}, kanál {ch + 1}, {native} Hz"
                 log.info("Audio input started: %s", self.detail)
                 attempt = 0
+                last_error = ""
                 while True:
                     try:
                         block = await asyncio.wait_for(q.get(), timeout=3.0)
@@ -188,14 +219,26 @@ class DeviceSource(Source):
                 self.state = "error"
                 self.error = str(e)
                 attempt += 1
-                log.error("Audio input error: %s (retry in 3 s)", e)
+                # A missing interface retries every 3 s: log each new error once, not forever.
+                if self.error != last_error:
+                    last_error = self.error
+                    log.error("Audio input error: %s (retrying every 3 s)", e)
             finally:
                 if stream is not None:
                     try:
-                        await asyncio.to_thread(stream.close)
+                        await asyncio.to_thread(_close_stream, stream)
                     except Exception:
                         pass
             await asyncio.sleep(3)
+
+
+def _close_stream(stream) -> None:
+    global _open_streams
+    with _pa_lock:
+        try:
+            stream.close()
+        finally:
+            _open_streams -= 1
 
 
 class BrowserSource(Source):
@@ -272,6 +315,12 @@ class FileSource(Source):
                     if wf.getsampwidth() != 2:
                         raise RuntimeError("Podporován je jen 16bitový PCM WAV.")
                     rate, nch = wf.getframerate(), wf.getnchannels()
+                    # An empty file would otherwise spin in the rewind loop and
+                    # freeze the whole server.
+                    if wf.getnframes() <= 0:
+                        raise RuntimeError("WAV soubor je prázdný.")
+                    if not 4000 <= rate <= 384000 or not 1 <= nch <= 64:
+                        raise RuntimeError(f"Nepodporovaný WAV: {rate} Hz, {nch} kanálů.")
                     resampler = soxr.ResampleStream(rate, TARGET_RATE, 1, dtype="float32")
                     self.state, self.error = "running", ""
                     self.detail = f"{self.path.name}, {rate} Hz, smyčka"
@@ -279,8 +328,11 @@ class FileSource(Source):
                     t = loop.time()
                     while True:
                         raw = wf.readframes(step)
+                        # Truncated last frame: keep whole frames only.
+                        raw = raw[: len(raw) - len(raw) % (2 * nch)]
                         if not raw:
                             wf.rewind()
+                            await asyncio.sleep(0.01)
                             continue
                         x = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
                         if nch > 1:

@@ -78,7 +78,8 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 | Relace na vyžádání | Jazyk se připojí ke Gemini až s prvním posluchačem a po nastavené době bez posluchačů se odpojí. „Stále zapnuto“ jen pro hlavní jazyk. |
 | Kódování jednou pro všechny | Zpráva pro Gemini se sestaví jednou pro všechny jazyky, Opus/MP3 se kóduje jednou na jazyk a stejné bajty jdou všem posluchačům. |
 | Opus ~20 kbps místo PCM 384 kbps | Na Wi-Fi v sále unese stovky telefonů (200 posluchačů ≈ 4–5 Mbit/s). |
-| Fronty na posluchače | Pomalý telefon zahazuje staré rámce, ostatní nebrzdí. |
+| Fronty na posluchače | Pomalý telefon zahazuje nejstarší zvukové rámce (zůstane u živého vysílání), ostatní nebrzdí. Kdo nestíhá ani text, je odpojen a po automatickém připojení dostane čerstvou historii. |
+| Nával po zobrazení QR | Fronta příchozích spojení 1024, historie přepisu se serializuje jednou a sdílí, limit otevřených souborů v kontejneru 65536. |
 | Plynulé předání relace | Na `goAway` od Google se otevře nová relace dřív, než stará skončí: překlad nevypadne. |
 | Statika | Předkomprimované `.gz`, self-hostovaný font (žádné volání Google Fonts z telefonů), service worker. |
 
@@ -90,8 +91,9 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 | `ADMIN_PASSWORD` | vygenerováno | Heslo do `/admin`. |
 | `HTTP_PORT` | `8080` | Port na hostiteli. |
 | `DOMAIN` | – | Doména pro profil `https`. |
-| `MAX_CLIENTS` | `1000` | Strop současných posluchačů. |
-| `TRUST_PROXY` | `1` | Věřit hlavičkám `X-Forwarded-*` od reverzní proxy. |
+| `MAX_CLIENTS` | `1000` | Strop současných posluchačů (zvlášť pro aplikaci a pro MP3 streamy). |
+| `TRUSTED_PROXIES` | `127.0.0.0/8,::1/128,172.16.0.0/12` | Adresy reverzních proxy, kterým se věří hlavičky `X-Forwarded-*` (výchozí pokrývá Caddy z `docker-compose`). Od ostatních se ignorují. |
+| `TRUST_PROXY` | `1` | `0` vypne hlavičky `X-Forwarded-*` úplně. |
 | `LOG_LEVEL` | `INFO` | Úroveň logování. |
 | `GEMINI_WS_URL` | Google v1beta | Jen pro testy (mock server). |
 
@@ -130,7 +132,13 @@ web/
 ## Bezpečnost a provoz
 
 - API klíč zůstává na serveru, telefony ho nikdy nevidí.
-- Administrace: heslo, HttpOnly + SameSite=Strict cookie, omezení pokusů o přihlášení.
+- Administrace: heslo, HttpOnly + SameSite=Strict cookie, kontrola `Origin` u všech změn
+  i WebSocketů (ochrana proti CSRF a převzetí WebSocketu z cizí stránky).
+- Omezení pokusů o přihlášení: 8 chyb za 5 minut na adresu a celkem 100 za 5 minut pro všechny
+  (podvržené nebo střídané adresy tak hádání hesla neobejdou). `X-Forwarded-For` se čte jen
+  od důvěryhodné proxy (`TRUSTED_PROXIES`).
+- API klíč se nikdy neobjeví v logu ani v administraci (odstraňuje se i z chybových hlášek).
+- Posluchač, který zahlcuje server zprávami, je odpojen; limity zvlášť pro aplikaci a MP3 streamy.
 - Kontejner běží jako neprivilegovaný uživatel, read-only filesystem, bez capabilities.
 - Přeložený obsah jde do Google (Gemini API). Ověřte, že to odpovídá pravidlům akce a GDPR
   (informujte účastníky, že se řeč zpracovává AI službou).

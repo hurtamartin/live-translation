@@ -29,8 +29,11 @@ HANGOVER_FRAMES = 12                    # keep clients' clocks running across sh
 MAX_FIFO_BYTES = OUT_RATE * 2 * 20      # never let latency grow past 20 s
 SENTENCE_END = tuple(".!?…。！？")
 HISTORY = 80
+HISTORY_SENT = 40                       # segments a newly joined listener receives
 GAP_BLOCKS = 50                         # audio kept while reconnecting (5 s of 100 ms blocks)
 GAP_MAX_AGE = 8.0                       # older buffered audio is stale, not worth translating
+DRAIN_S = 6.0                           # an old session finishes its sentence after goAway
+MAX_BACKOFF = 20.0
 
 
 class Channel:
@@ -46,7 +49,6 @@ class Channel:
         self.active: GeminiConnection | None = None
         self._task: asyncio.Task | None = None
         self._stop_handle: asyncio.TimerHandle | None = None
-        self._wake = asyncio.Event()
         # Input that arrives while a dropped session is being replaced; sent to the
         # new session so no words are lost to the gap.
         self._gap: collections.deque[tuple[float, str]] = collections.deque(maxlen=GAP_BLOCKS)
@@ -56,6 +58,7 @@ class Channel:
         self._seg_id = 0
         self._brk = True
         self._last_text = 0.0
+        self._hist_cache: str | None = None
 
         self.fifo = bytearray()
         self._pacer: asyncio.Task | None = None
@@ -71,142 +74,179 @@ class Channel:
 
     # ------------------------------------------------------------- demand
 
-    def update_demand(self) -> None:
+    def _enabled(self) -> bool:
         s = self.engine.settings
-        enabled = s.on_air and self.lang in s.languages
-        wanted = enabled and bool(self.clients or self.streams or self.lang in s.always_on)
-        if wanted:
+        return s.on_air and self.lang in s.languages
+
+    def _wanted(self) -> bool:
+        s = self.engine.settings
+        return self._enabled() and bool(self.clients or self.streams or self.lang in s.always_on)
+
+    def update_demand(self) -> None:
+        if self._wanted():
             self._cancel_stop()
             if self._task is None:
                 self._task = asyncio.create_task(self._supervise(), name=f"channel-{self.lang}")
                 self._update_pacer()
-        elif self._task is not None and self._stop_handle is None:
-            delay = s.idle_stop_s if enabled else 0
-            if delay <= 0:
-                spawn(self.stop(), f"stop-{self.lang}")
-            else:
-                loop = asyncio.get_running_loop()
-                self._stop_handle = loop.call_later(delay, lambda: spawn(self._idle_stop(), f"idle-{self.lang}"))
+            return
+        if self._task is None:
+            self._cancel_stop()
+            return
+        delay = self.engine.settings.idle_stop_s
+        if not self._enabled() or delay <= 0:
+            # Off air: close right away, even if an idle timer is already pending.
+            self._halt_soon()
+        elif self._stop_handle is None:
+            self._stop_handle = asyncio.get_running_loop().call_later(delay, self._idle_expired)
 
-    async def _idle_stop(self) -> None:
+    def _idle_expired(self) -> None:
         self._stop_handle = None
-        s = self.engine.settings
-        if not (self.clients or self.streams or self.lang in s.always_on):
-            log.info("[%s] no listeners for %d s, closing session", self.lang, s.idle_stop_s)
-            await self.stop()
+        if self._task is not None and not self._wanted():
+            log.info("[%s] no listeners for %d s, closing session",
+                     self.lang, self.engine.settings.idle_stop_s)
+            self._halt_soon()
 
     def _cancel_stop(self) -> None:
         if self._stop_handle is not None:
             self._stop_handle.cancel()
             self._stop_handle = None
 
-    async def stop(self) -> None:
+    def _halt(self) -> asyncio.Task | None:
+        """Stop the supervisor synchronously; returns the task still winding down.
+
+        Everything a new supervisor relies on is reset here, before any await,
+        so update_demand() may start a successor immediately.
+        """
         self._cancel_stop()
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        self.active = None
+        self._gap.clear()
         self._update_pacer()
+        return task
 
-    async def restart(self) -> None:
+    def _halt_soon(self) -> None:
+        task = self._halt()
+        if task is not None:
+            spawn(asyncio.wait([task]), f"stop-{self.lang}")
+
+    async def stop(self) -> None:
+        task = self._halt()
+        if task is not None:
+            await asyncio.wait([task])   # does not swallow our own cancellation
+
+    def restart(self) -> None:
+        """Reconnect with the current settings (key, model, instructions)."""
         if self._task is not None:
-            await self.stop()
+            self._halt_soon()
         self.update_demand()
-
-    def poke(self) -> None:
-        """Settings changed: wake a supervisor that is waiting to retry."""
-        self._wake.set()
-
-    async def _sleep(self, seconds: float) -> None:
-        try:
-            await asyncio.wait_for(self._wake.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass
-        self._wake.clear()
 
     # ------------------------------------------------------------- session
 
     def _set_status(self, status: str, error: str = "") -> None:
         if status == self.status and error == self.error:
             return
+        changed = status != self.status
         self.status, self.error = status, error
-        self._broadcast(json.dumps({"t": "ch", "lang": self.lang, "status": status}))
+        if changed:
+            self._broadcast(json.dumps({"t": "ch", "lang": self.lang, "status": status}))
 
     async def _supervise(self) -> None:
+        """Keep one translation session open while the channel is wanted.
+
+        Must never die on its own: any unexpected error is logged and retried,
+        otherwise the channel would be stuck "connecting" until a restart.
+        """
         engine = self.engine
+        me = asyncio.current_task()
         backoff = 1.0
         first = True
+        current: GeminiConnection | None = None   # the session this supervisor owns
         try:
             while True:
-                if self.active is not None and self.active.ws is not None and self.active.ws.closed:
-                    self.active = None
-                if self.active is None:
-                    self._set_status("connecting" if first else "reconnecting", self.error)
-                first = False
-
-                key = engine.store.api_key
-                if not key:
-                    self._set_status("error", "Chybí API klíč Gemini. Zadejte ho v administraci.")
-                    await self._sleep(3600)
-                    continue
-
-                s = engine.settings
-                setup = build_setup(s.model, self.lang, s.echo_target, s.system_instruction,
-                                    engine.placement)
-                conn = GeminiConnection(engine.http, engine.env.gemini_ws_url, key, setup, self,
-                                        f"[{self.lang}]")
                 try:
-                    await conn.open()
-                except SetupError as e:
-                    await conn.close()
-                    reason = getattr(e, "reason", "")
-                    if reason and engine.placement.adapt(reason):
-                        log.info("[%s] adjusted setup layout, retrying", self.lang)
-                        continue
-                    log.warning("[%s] %s", self.lang, e)
+                    if current is not None and not current.alive:
+                        if self.active is current:
+                            self.active = None
+                        await current.close()
+                        current = None
                     if self.active is None:
-                        self._set_status("error" if e.fatal else "reconnecting", str(e))
-                    await self._sleep(30 if e.fatal else backoff)
-                    backoff = min(backoff * 2, 20)
-                    continue
+                        self._set_status("connecting" if first else "reconnecting", self.error)
+                    first = False
 
-                old, self.active = self.active, conn
-                if old is not None:
-                    old.close_later(6.0)   # let the old session finish its sentence
-                self._flush_gap(conn)
-                self.connects += 1
-                backoff = 1.0
-                self._set_status("live")
-                log.info("[%s] translation session live", self.lang)
+                    key = engine.store.api_key
+                    if not key:
+                        self._set_status("error", "Chybí API klíč Gemini. Zadejte ho v administraci.")
+                        await asyncio.sleep(3600)   # restart() wakes us when a key is set
+                        continue
 
-                if await conn.wait() == "goaway":
-                    continue  # open the next session while this one keeps running
-                if self.active is conn:
-                    self.active = None
-                await conn.close()
-                self._set_status("reconnecting", conn.close_reason or "Spojení s Google se přerušilo.")
-                await self._sleep(0.1 if backoff <= 1 else backoff)
-                backoff = min(backoff * 2, 20)
+                    s = engine.settings
+                    setup = build_setup(s.model, self.lang, s.echo_target, s.system_instruction,
+                                        engine.placement)
+                    conn = GeminiConnection(engine.http, engine.env.gemini_ws_url, key, setup, self,
+                                            f"[{self.lang}]")
+                    try:
+                        await conn.open()
+                    except SetupError as e:
+                        await conn.close()
+                        if e.reason and engine.placement.adapt(e.reason):
+                            log.info("[%s] adjusted setup layout, retrying", self.lang)
+                            continue
+                        log.warning("[%s] %s", self.lang, e)
+                        if self.active is None:
+                            self._set_status("error" if e.fatal else "reconnecting", str(e))
+                        await asyncio.sleep(30 if e.fatal else backoff)
+                        backoff = min(backoff * 2, MAX_BACKOFF)
+                        continue
+                    except BaseException:
+                        await conn.close()
+                        raise
+
+                    old, current = current, conn
+                    self.active = conn
+                    if old is not None:
+                        old.close_later(DRAIN_S)   # let the old session finish its sentence
+                    self._flush_gap(conn)
+                    self.connects += 1
+                    backoff = 1.0
+                    self._set_status("live")
+                    log.info("[%s] translation session live", self.lang)
+
+                    if await conn.wait() == "goaway":
+                        continue  # open the next session while this one keeps running
+                    if self.active is conn:
+                        self.active = None
+                    current = None
+                    await conn.close()
+                    self._set_status("reconnecting", conn.close_reason or "Spojení s Google se přerušilo.")
+                    await asyncio.sleep(0.1 if backoff <= 1 else backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("[%s] translation supervisor error, retrying", self.lang)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
         except asyncio.CancelledError:
             pass
         finally:
-            self._gap.clear()
-            conn, self.active = self.active, None
-            if conn is not None:
-                await conn.close()
-            self._set_status("idle")
+            if self.active is current:
+                self.active = None
+            if current is not None:
+                await current.close()
+            if self._task is None or self._task is me:   # no successor has taken over
+                self._gap.clear()
+                self._set_status("idle")
 
     @property
     def wants_audio(self) -> bool:
         """A session is live or being (re)opened, so input should not be dropped."""
-        return self.active is not None or self._task is not None
+        return self._task is not None
 
     def send_audio(self, message: str) -> None:
         conn = self.active
-        if conn is not None:
+        if conn is not None and conn.alive:
             conn.send_audio(message)
         elif self._task is not None:
             self._gap.append((time.monotonic(), message))
@@ -224,7 +264,7 @@ class Channel:
 
     def on_input_text(self, text: str, lang: str | None) -> None:
         if lang:
-            self.detected = lang
+            self.detected = str(lang)[:16]
         self._append("src", text)
 
     def on_output_text(self, text: str) -> None:
@@ -247,7 +287,9 @@ class Channel:
         self._last_audio = now
         self.fifo += pcm
         if len(self.fifo) > MAX_FIFO_BYTES:
-            del self.fifo[: len(self.fifo) - MAX_FIFO_BYTES]
+            # Drop whole samples from the front so the stream stays 16-bit aligned.
+            excess = len(self.fifo) - MAX_FIFO_BYTES
+            del self.fifo[: excess + (excess & 1)]
 
     def _append(self, kind: str, text: str) -> None:
         now = time.monotonic()
@@ -266,17 +308,23 @@ class Channel:
                 return
         seg[kind] += text
         self._last_text = now
+        self._hist_cache = None
         self._broadcast(json.dumps({"t": "tx", "s": seg["s"], "k": kind, "x": text},
                                    ensure_ascii=False))
 
     def history_message(self) -> str:
-        segs = list(self.segments)[-40:]
-        return json.dumps({"t": "hist", "lang": self.lang, "segs": segs}, ensure_ascii=False)
+        # Cached: when a QR code goes up, hundreds of phones join within seconds.
+        if self._hist_cache is None:
+            segs = list(self.segments)[-HISTORY_SENT:]
+            self._hist_cache = json.dumps({"t": "hist", "lang": self.lang, "segs": segs},
+                                          ensure_ascii=False)
+        return self._hist_cache
 
     def clear_history(self) -> None:
         self.segments.clear()
         self._seg = None
-        self._broadcast(json.dumps({"t": "hist", "lang": self.lang, "segs": []}))
+        self._hist_cache = None
+        self._broadcast(self.history_message())
 
     # ------------------------------------------------------------- listeners
 
@@ -329,6 +377,13 @@ class Channel:
             self._pacer = None
             self.fifo.clear()
 
+    def _pacer_died(self, task: asyncio.Task) -> None:
+        """The pacer ended on its own (should not happen): start a fresh one."""
+        if self._pacer is task and not task.cancelled():
+            self._pacer = None
+            self.fifo.clear()
+            asyncio.get_running_loop().call_later(1.0, self._update_pacer)
+
     async def _pace(self) -> None:
         """Real-time clock for the outgoing audio.
 
@@ -336,13 +391,20 @@ class Channel:
         40 ms frame stream: Opus frames for app listeners (only while there is
         speech) and a continuous MP3 stream for background listeners.
         """
+        asyncio.current_task().add_done_callback(self._pacer_died)
         loop = asyncio.get_running_loop()
-        opus = OpusEncoder(OUT_RATE, FRAME_SAMPLES) if OpusEncoder.available() else None
+        opus: OpusEncoder | None = None
         mp3: Mp3Encoder | None = None
+        if OpusEncoder.available():
+            try:
+                opus = OpusEncoder(OUT_RATE, FRAME_SAMPLES)
+            except Exception:
+                log.exception("[%s] Opus encoder unavailable, app audio disabled", self.lang)
         silence = bytes(FRAME_BYTES)
         fifo = self.fifo
         playing = False
         hang = 0
+        errors = 0
         t = loop.time()
         try:
             while True:
@@ -372,25 +434,31 @@ class Channel:
                 elif hang:
                     hang -= 1
 
-                if (frame is not silence or hang) and opus is not None and self.audio_clients:
-                    self.seq = (self.seq + 1) & 0xFFFFFFFF
-                    packet = b"\x01" + self.seq.to_bytes(4, "big") + opus.encode(frame)
-                    for c in self.audio_clients:
-                        c.send_audio(packet)
+                try:
+                    if (frame is not silence or hang) and opus is not None and self.audio_clients:
+                        self.seq = (self.seq + 1) & 0xFFFFFFFF
+                        packet = b"\x01" + self.seq.to_bytes(4, "big") + opus.encode(frame)
+                        for c in self.audio_clients:
+                            c.send_audio(packet)
 
-                if self.streams:
-                    if mp3 is None and Mp3Encoder.available():
-                        mp3 = Mp3Encoder(OUT_RATE)
-                    if mp3 is not None:
-                        data = mp3.encode(frame)
-                        if data:
-                            for sink in self.streams:
-                                sink.push(data)
-                elif mp3 is not None:
-                    mp3.close()
-                    mp3 = None
+                    if self.streams:
+                        if mp3 is None and Mp3Encoder.available():
+                            mp3 = Mp3Encoder(OUT_RATE)
+                        if mp3 is not None:
+                            data = mp3.encode(frame)
+                            if data:
+                                for sink in self.streams:
+                                    sink.push(data)
+                    elif mp3 is not None:
+                        mp3.close()
+                        mp3 = None
+                except Exception:
+                    # One bad frame must not silence the channel for everyone.
+                    errors += 1
+                    if errors == 1 or errors % 1000 == 0:
+                        log.exception("[%s] audio frame failed (%d so far)", self.lang, errors)
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception:
             log.exception("[%s] audio pacer failed", self.lang)
         finally:
@@ -418,9 +486,14 @@ class Channel:
         }
 
     async def shutdown(self) -> None:
+        """Language removed from the event: release listeners and streams."""
         await self.stop()
+        removed = json.dumps({"t": "ch", "lang": self.lang, "status": "removed"})
         for c in list(self.clients):
-            c.send_text(json.dumps({"t": "ch", "lang": self.lang, "status": "removed"}))
+            c.send_text(removed)
             c.channel = None
+        for sink in list(self.streams):
+            sink.close()
         self.clients.clear()
         self.audio_clients.clear()
+        self.streams.clear()

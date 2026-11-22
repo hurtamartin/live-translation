@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import collections
 import json
@@ -46,6 +47,7 @@ class Engine:
         self.sending = False
         self.sent_seconds = 0.0
         self.started = time.time()
+        self._info: str | None = None
 
     @property
     def settings(self):
@@ -63,12 +65,24 @@ class Engine:
         await self._start_source()
 
     async def stop(self) -> None:
-        for ch in list(self.channels.values()):
-            await ch.stop()
+        """Graceful shutdown, bounded in time (docker stop allows ~10 s)."""
+        channels = list(self.channels.values())
+        await asyncio.gather(*(ch.stop() for ch in channels), return_exceptions=True)
         await self.source.stop()
-        for c in list(self.clients):
+        for ch in channels:
+            for sink in list(ch.streams):
+                sink.close()
+        clients = list(self.clients)
+        for c in clients:
             c.close()
-            await c.ws.close(code=1001, message=b"server shutdown")
+        if clients:
+            # Concurrently: a phone that vanished would otherwise hold each close
+            # for the full close timeout, one after another.
+            closing = [asyncio.ensure_future(c.ws.close(code=1001, message=b"server shutdown"))
+                       for c in clients]
+            _, pending = await asyncio.wait(closing, timeout=3)
+            for f in pending:
+                f.cancel()
         if self.http is not None:
             await self.http.close()
 
@@ -121,9 +135,7 @@ class Engine:
             self._sync_channels()
         if changed & {"model", "system_instruction", "echo_target", "api_key"}:
             for ch in self.channels.values():
-                ch.poke()
-                if ch.status != "idle":
-                    await ch.restart()
+                ch.restart()   # reconnects in the background with the new setup
         if changed & {"on_air", "always_on", "idle_stop_s"}:
             for ch in self.channels.values():
                 ch.update_demand()
@@ -188,8 +200,10 @@ class Engine:
     # ------------------------------------------------------------- listeners
 
     def info_message(self) -> str:
+        if self._info is not None:
+            return self._info
         s = self.settings
-        return json.dumps({
+        self._info = json.dumps({
             "t": "info",
             "title": s.event_title,
             "onAir": s.on_air,
@@ -197,11 +211,19 @@ class Engine:
             "codecs": codecs(),
             "v": __version__,
         }, ensure_ascii=False)
+        return self._info
 
     def broadcast_info(self) -> None:
+        self._info = None
         msg = self.info_message()
         for c in self.clients:
             c.send_text(msg)
+
+    def listener_count(self) -> int:
+        return len(self.clients)
+
+    def stream_count(self) -> int:
+        return sum(len(ch.streams) for ch in self.channels.values())
 
     def add_client(self, client: Client) -> None:
         self.clients.add(client)

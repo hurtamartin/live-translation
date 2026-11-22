@@ -28,7 +28,14 @@ class RingHandler(logging.Handler):
     def since(self, seq: int) -> list[dict]:
         if seq >= self.seq:
             return []
-        return [r for r in self.records if r["i"] > seq]
+        # emit() runs under this lock and may be called from worker threads
+        # (device listing, PortAudio): iterating unlocked could raise
+        # "deque mutated during iteration" and kill the admin status feed.
+        self.acquire()
+        try:
+            return [r for r in self.records if r["i"] > seq]
+        finally:
+            self.release()
 
 
 ring = RingHandler()

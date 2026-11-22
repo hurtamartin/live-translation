@@ -23,6 +23,14 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Every listener is an open socket; the common default of 1024 would refuse
+    # phones long before MAX_CLIENTS is reached.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Time to close the Gemini sessions and listener sockets cleanly.
+    stop_grace_period: 15s
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import re
@@ -18,6 +19,8 @@ from .util import spawn
 log = logging.getLogger(__name__)
 
 SETUP_TIMEOUT = 15.0
+MAX_MESSAGE = 32 * 1024 * 1024   # Gemini audio chunks are ~100 kB; refuse anything absurd
+SEND_QUEUE = 50                  # 5 s of 100 ms input blocks
 
 
 class Events(Protocol):
@@ -31,10 +34,10 @@ class Events(Protocol):
 class SetupError(Exception):
     """Setup failed. `fatal` means retrying soon will not help (bad key, bad model)."""
 
-    def __init__(self, message: str, fatal: bool = False, adapted: bool = False) -> None:
+    def __init__(self, message: str, fatal: bool = False, reason: str = "") -> None:
         super().__init__(message)
         self.fatal = fatal
-        self.adapted = adapted
+        self.reason = reason
 
 
 class Placement:
@@ -98,6 +101,20 @@ def _classify_close(code: int | None, reason: str) -> tuple[str, bool]:
     return f"Spojení s Google se uzavřelo (kód {code})", False
 
 
+_KEY_PARAM = re.compile(r"([?&]key=)[^&\s'\"]+", re.I)
+
+
+def redact(text: str, secret: str = "") -> str:
+    """Strip the API key from text that ends up in logs or the admin page.
+
+    aiohttp puts the request URL (with ?key=...) into some exception messages.
+    """
+    text = _KEY_PARAM.sub(r"\1…", text)
+    if secret and len(secret) >= 6:
+        text = text.replace(secret, "…").replace(quote(secret), "…")
+    return text
+
+
 class GeminiConnection:
     def __init__(self, http: aiohttp.ClientSession, url: str, api_key: str, setup: dict,
                  events: Events, label: str) -> None:
@@ -108,15 +125,22 @@ class GeminiConnection:
         self.events = events
         self.label = label
         self.ws: aiohttp.ClientWebSocketResponse | None = None
-        self._send_q: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
+        self._send_q: asyncio.Queue[str] = asyncio.Queue(maxsize=SEND_QUEUE)
         self._tasks: list[asyncio.Task] = []
         self.ended: asyncio.Future[str] | None = None
         self.dropped = 0
         self._rate_warned = False
+        self._bad_warned = False
         self._closing = False
         self.close_reason = ""
         self.opened_at = 0.0
         self.last_rx = 0.0
+
+    @property
+    def alive(self) -> bool:
+        """Open and still reading: input sent now will be translated."""
+        return (not self._closing and self.ws is not None and not self.ws.closed
+                and bool(self._tasks) and not self._tasks[0].done())
 
     async def open(self) -> None:
         loop = asyncio.get_running_loop()
@@ -124,58 +148,56 @@ class GeminiConnection:
         sep = "&" if "?" in self.url else "?"
         try:
             self.ws = await self.http.ws_connect(
-                f"{self.url}{sep}key={quote(self.api_key)}",
-                heartbeat=25, max_msg_size=0, compress=0,
+                f"{self.url}{sep}key={quote(self.api_key, safe='')}",
+                heartbeat=25, max_msg_size=MAX_MESSAGE, compress=0,
             )
         except aiohttp.WSServerHandshakeError as e:
             fatal = e.status in (400, 401, 403, 404)
-            raise SetupError(f"Google odmítl spojení (HTTP {e.status})", fatal=fatal) from e
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-            raise SetupError(f"Nelze se spojit s Google: {e}") from e
+            raise SetupError(f"Google odmítl spojení (HTTP {e.status})", fatal=fatal) from None
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as e:
+            raise SetupError(f"Nelze se spojit s Google: {redact(str(e), self.api_key)}") from None
 
-        await self.ws.send_str(json.dumps(self.setup))
         try:
+            await self.ws.send_str(json.dumps(self.setup))
             msg = await self.ws.receive(timeout=SETUP_TIMEOUT)
         except asyncio.TimeoutError:
-            await self.ws.close()
-            raise SetupError("Google neodpověděl na nastavení relace.")
+            raise SetupError("Google neodpověděl na nastavení relace.") from None
+        except (aiohttp.ClientError, OSError, RuntimeError) as e:
+            raise SetupError(f"Spojení s Google se přerušilo: {redact(str(e), self.api_key)}") from None
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
                         aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-            reason = (msg.extra or "") if msg.type == aiohttp.WSMsgType.CLOSE else ""
+            reason = str(msg.extra or "") if msg.type == aiohttp.WSMsgType.CLOSE else ""
             code = msg.data if msg.type == aiohttp.WSMsgType.CLOSE else self.ws.close_code
-            raise self._setup_failure(code, str(reason))
+            text, fatal = _classify_close(code, redact(reason, self.api_key))
+            raise SetupError(text, fatal=fatal, reason=reason)
         self.opened_at = self.last_rx = time.monotonic()
-        self._handle_raw(msg)
+        self._dispatch(msg)
         self._tasks = [
             asyncio.create_task(self._reader(), name=f"gemini-read-{self.label}"),
             asyncio.create_task(self._writer(), name=f"gemini-write-{self.label}"),
         ]
 
-    def _setup_failure(self, code, reason: str) -> SetupError:
-        text, fatal = _classify_close(code, reason)
-        err = SetupError(text, fatal=fatal)
-        err.reason = reason  # type: ignore[attr-defined]
-        return err
-
     def send_audio(self, message: str) -> None:
-        if self._send_q.full():
+        q = self._send_q
+        if q.full():
             try:
-                self._send_q.get_nowait()
+                q.get_nowait()
                 self.dropped += 1
             except asyncio.QueueEmpty:
                 pass
-        self._send_q.put_nowait(message)
+        q.put_nowait(message)
 
     async def _writer(self) -> None:
         assert self.ws is not None
+        ws, q = self.ws, self._send_q
         try:
             while True:
-                msg = await self._send_q.get()
-                await self.ws.send_str(msg)
+                msg = await q.get()
+                await ws.send_str(msg)
         except (asyncio.CancelledError, ConnectionResetError):
             pass
         except Exception as e:
-            log.debug("%s writer stopped: %s", self.label, e)
+            log.debug("%s writer stopped: %s", self.label, redact(str(e), self.api_key))
 
     async def _reader(self) -> None:
         assert self.ws is not None
@@ -185,17 +207,18 @@ class GeminiConnection:
                 msg = await self.ws.receive()
                 if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
                     self.last_rx = time.monotonic()
-                    if self._handle_raw(msg) == "goaway":
+                    if self._dispatch(msg) == "goaway":
                         self._end("goaway")
                     continue
                 if msg.type == aiohttp.WSMsgType.CLOSE:
-                    reason = msg.extra or ""
+                    reason = str(msg.extra or "")
                 break
         except asyncio.CancelledError:
             pass
         except Exception as e:
             reason = str(e)
         finally:
+            reason = redact(reason, self.api_key)
             code = self.ws.close_code if self.ws else None
             if not self._closing:
                 now = time.monotonic()
@@ -209,12 +232,24 @@ class GeminiConnection:
                     self.close_reason = "Google přerušil spojení bez udání důvodu."
                     log.info("%s: connection dropped after %.0f s (code %s, last message %.1f s "
                              "before, %d audio blocks dropped)%s", self.label, now - self.opened_at,
-                             code, now - self.last_rx, self.dropped, f": {exc}" if exc else "")
+                             code, now - self.last_rx, self.dropped,
+                             f": {redact(str(exc), self.api_key)}" if exc else "")
             self._end(outcome)
 
     def _end(self, outcome: str) -> None:
         if self.ended and not self.ended.done():
             self.ended.set_result(outcome)
+
+    def _dispatch(self, msg: aiohttp.WSMessage) -> str | None:
+        """Handle one server message. A malformed message (or a bug in a handler)
+        is logged once and skipped: it must not end a working session."""
+        try:
+            return self._handle_raw(msg)
+        except Exception:
+            if not self._bad_warned:
+                self._bad_warned = True
+                log.exception("%s: could not handle a message from Google", self.label)
+            return None
 
     def _handle_raw(self, msg: aiohttp.WSMessage) -> str | None:
         data = msg.data if msg.type == aiohttp.WSMsgType.TEXT else msg.data.decode("utf-8", "replace")
@@ -222,32 +257,43 @@ class GeminiConnection:
             j = json.loads(data)
         except ValueError:
             return None
+        if not isinstance(j, dict):
+            return None
         sc = j.get("serverContent")
         ev = self.events
-        if sc:
+        if isinstance(sc, dict):
             it = sc.get("inputTranscription")
-            if it and it.get("text"):
-                ev.on_input_text(it["text"], it.get("languageCode"))
+            if isinstance(it, dict) and it.get("text"):
+                ev.on_input_text(str(it["text"]), it.get("languageCode"))
             ot = sc.get("outputTranscription")
-            if ot and ot.get("text"):
-                ev.on_output_text(ot["text"])
+            if isinstance(ot, dict) and ot.get("text"):
+                ev.on_output_text(str(ot["text"]))
             turn = sc.get("modelTurn")
-            if turn:
+            if isinstance(turn, dict):
                 for part in turn.get("parts") or ():
-                    inline = part.get("inlineData")
-                    if inline and inline.get("data"):
-                        mime = inline.get("mimeType", "")
+                    inline = part.get("inlineData") if isinstance(part, dict) else None
+                    if isinstance(inline, dict) and inline.get("data"):
+                        mime = str(inline.get("mimeType", ""))
                         if "rate=" in mime and "rate=24000" not in mime and not self._rate_warned:
                             self._rate_warned = True
                             log.warning("%s: unexpected audio format %s", self.label, mime)
-                        ev.on_audio(base64.b64decode(inline["data"]))
+                        try:
+                            pcm = base64.b64decode(inline["data"])
+                        except (binascii.Error, ValueError, TypeError):
+                            continue
+                        if len(pcm) & 1:
+                            pcm = pcm[:-1]
+                        if pcm:
+                            ev.on_audio(pcm)
             if sc.get("turnComplete"):
                 ev.on_turn_complete()
         usage = j.get("usageMetadata")
-        if usage and usage.get("totalTokenCount"):
+        if isinstance(usage, dict) and usage.get("totalTokenCount"):
             ev.on_usage(int(usage["totalTokenCount"]))
         if "goAway" in j:
-            log.info("%s: goAway received (%s)", self.label, j["goAway"].get("timeLeft", "?"))
+            ga = j["goAway"]
+            log.info("%s: goAway received (%s)", self.label,
+                     ga.get("timeLeft", "?") if isinstance(ga, dict) else "?")
             return "goaway"
         return None
 
