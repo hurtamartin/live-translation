@@ -1,0 +1,18 @@
+# Direct runtime dependencies (allowed ranges).
+#
+# requirements.txt is the lock generated from this file: exact versions of every
+# package, including transitive ones, with hashes. Docker installs only the lock,
+# so a deploy always gets the versions the tests ran against. To upgrade:
+#
+#   uv pip compile requirements.in --universal --python-version 3.12 --generate-hashes -o requirements.txt
+#   uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes -o requirements-dev.txt
+#
+# then run the tests and rebuild the image.
+
+# 3.12.14+: fixes for request smuggling (CVE-2024-52304, CVE-2025-53643)
+aiohttp>=3.12.14,<4
+numpy>=2.0,<3
+soxr>=0.5,<2
+sounddevice>=0.5,<1
+segno>=1.6,<2
+uvloop>=0.21; sys_platform != "win32"

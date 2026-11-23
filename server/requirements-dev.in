@@ -1,0 +1,4 @@
+# Test tools on top of the runtime lock (same versions as production).
+-c requirements.txt
+-r requirements.in
+pytest>=8,<10
