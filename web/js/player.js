@@ -112,7 +112,14 @@ export class LivePlayer {
 
   get state() { return this.ctx ? this.ctx.state : 'closed'; }
 
-  async resume() { if (this.ctx && this.ctx.state !== 'running') await this.ctx.resume(); }
+  /** Pause (lock screen, headset button): the player stays ready to resume. */
+  async pause() { if (this.ctx && this.ctx.state === 'running') await this.ctx.suspend(); }
+
+  async resume() {
+    if (!this.ctx || this.ctx.state === 'running') return;
+    this.flush();   // whatever queued up meanwhile is stale: resume at the live edge
+    await this.ctx.resume();
+  }
 
   stop() {
     try { if (this.decoder && this.decoder.state !== 'closed') this.decoder.close(); } catch { /* ignore */ }
@@ -130,6 +137,7 @@ export class StreamPlayer {
     this.audio.preload = 'none';
     this.audio.setAttribute('playsinline', '');
     this.active = false;
+    this.held = false;       // paused on purpose: no automatic restarts
     this.retry = 0;
     this.timer = 0;
     this.restartTimer = 0;
@@ -145,6 +153,7 @@ export class StreamPlayer {
   async start() {
     preferPlayback();
     this.active = true;
+    this.held = false;
     this.onState('buffering');
     this.audio.src = this.url + '?t=' + Date.now();
     clearInterval(this.timer);
@@ -158,7 +167,7 @@ export class StreamPlayer {
   // behind (pitch is preserved), and only reload the stream after a long lag.
   _watch() {
     const a = this.audio;
-    if (!this.active) return;
+    if (!this.active || this.held) return;
     if (this.waitingSince && performance.now() - this.waitingSince > 12000) {
       this.waitingSince = 0;
       this._recover();
@@ -179,7 +188,7 @@ export class StreamPlayer {
   }
 
   _recover() {
-    if (!this.active) return;
+    if (!this.active || this.held) return;
     this.onState('buffering');
     clearTimeout(this.restartTimer);
     const delay = Math.min(1000 * 2 ** this.retry++, 10000);
@@ -193,7 +202,25 @@ export class StreamPlayer {
 
   get state() { return this.active && !this.audio.paused ? 'running' : 'suspended'; }
 
-  async resume() { if (this.active && this.audio.paused) await this.audio.play(); }
+  /** Pause (lock screen, headset button). The element is kept, so the lock screen
+   *  keeps its player and play works from there too. */
+  pause() {
+    if (!this.active) return;
+    this.held = true;
+    this.waitingSince = 0;
+    clearTimeout(this.restartTimer);
+    this.audio.pause();
+  }
+
+  /** Resume at the live edge: a paused stream would go on from where it stopped. */
+  async resume() {
+    if (!this.active || !this.audio.paused) return;
+    this.held = false;
+    clearTimeout(this.restartTimer);
+    this.audio.playbackRate = 1;
+    this.audio.src = this.url + '?t=' + Date.now();
+    await this.audio.play();
+  }
 
   stop() {
     this.active = false;

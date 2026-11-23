@@ -3,17 +3,39 @@
 :root {
   --fs: 1.3rem;
   --dock-h: 86px;
-  --dock-gap: calc(12px + env(safe-area-inset-bottom));
+  /* Where native floating bars sit. Android and the rest: clear of the gesture or
+     button bar, 12 px where the system reserves nothing. */
+  --dock-side: 12px;
+  --dock-gap: max(12px, env(safe-area-inset-bottom) + 8px);
   --toast-bottom: calc(var(--dock-h) + var(--dock-gap) + 14px);
+}
+/* iOS: 17 pt from the bottom and the sides, exactly like the Home Screen dock (Apple's
+   own floating bars overlap the home indicator area). An install cut short at the
+   bottom (see js/viewport.js) rests on the edge of the page instead. */
+html.ios {
+  --dock-side: 17px;
+  --dock-gap: max(0px, max(12px, env(safe-area-inset-bottom) - 17px) - var(--vp-short, 0px));
 }
 
 html, body { height: 100%; }
+
+/* Behaves like an installed app: no pinch or double-tap zoom (the text size setting
+   covers readability), no pull-to-refresh or rubber-banding of the whole page. */
+html {
+  touch-action: pan-x pan-y;
+  overscroll-behavior: none;
+}
 
 body {
   display: flex;
   flex-direction: column;
   height: 100dvh;
   overflow: hidden;
+  /* The top edge is plain background colour, the same as theme-color: an opaque
+     status bar (installed app) or the browser's toolbar continues it without a seam,
+     and the ambient glow fades in below. */
+  background: linear-gradient(var(--bg), transparent 120px), var(--ambient), var(--bg);
+  background-attachment: fixed;
 }
 
 /* ---------- Top bar ---------- */
@@ -292,7 +314,7 @@ body.show-src .seg .src:not(:empty) { display: block; }
   left: 0; right: 0;
   bottom: 0;
   z-index: 4;
-  padding: 0 max(12px, env(safe-area-inset-right)) var(--dock-gap) max(12px, env(safe-area-inset-left));
+  padding: 0 max(var(--dock-side), env(safe-area-inset-right)) var(--dock-gap) max(var(--dock-side), env(safe-area-inset-left));
   pointer-events: none;
   -webkit-user-select: none;
   user-select: none;
@@ -314,6 +336,9 @@ body.show-src .seg .src:not(:empty) { display: block; }
   backdrop-filter: blur(22px) saturate(1.5);
   box-shadow: var(--shadow-l);
 }
+/* Cut short at the bottom (js/viewport.js): nothing paints below the dock, so its
+   shadow would end in a hard line across the screen. */
+html.vp-short .dock-inner { box-shadow: none; }
 
 .channel {
   flex: 1;
@@ -617,6 +642,9 @@ body.show-src .seg .src:not(:empty) { display: block; }
 @media (max-width: 360px) {
   .share-card { flex-direction: column; align-items: stretch; }
   .share-card img { align-self: center; }
+}
+/* Up to the 375 px iPhones the status line under the language name needs the room. */
+@media (max-width: 380px) {
   .channel .chev { display: none; }
 }
 

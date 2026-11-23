@@ -37,6 +37,15 @@ function plural(n, one, few, many) {
   return n === 1 ? one : n >= 2 && n <= 4 ? few : many;
 }
 
+// Czech number style: decimal comma ("1,5 min") and a real minus sign ("−50 dB").
+const nf = new Intl.NumberFormat('cs-CZ', { maximumFractionDigits: 1 });
+const num = (n) => nf.format(n).replace('-', '−');
+
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+};
+
 const SERVER_DOWN = 'Server není dostupný. Zkontrolujte, že běží.';
 
 async function api(method, path, body) {
@@ -164,11 +173,12 @@ function fillFields() {
 }
 
 function updateOutputs() {
-  $('gainOut').textContent = `${(+$('gain_db').value > 0 ? '+' : '')}${$('gain_db').value} dB`;
-  $('thrOut').textContent = `${$('gate_threshold_db').value} dB`;
-  $('holdOut').textContent = `${(+$('gate_hold_ms').value / 1000).toFixed(1)} s`;
+  const gain = +$('gain_db').value;
+  $('gainOut').textContent = `${gain > 0 ? '+' : ''}${num(gain)} dB`;
+  $('thrOut').textContent = `${num(+$('gate_threshold_db').value)} dB`;
+  $('holdOut').textContent = `${num(+$('gate_hold_ms').value / 1000)} s`;
   const idle = +$('idle_stop_s').value;
-  $('idleOut').textContent = idle === 0 ? 'ihned' : idle < 60 ? `${idle} s` : `${(idle / 60).toFixed(idle % 60 ? 1 : 0)} min`;
+  $('idleOut').textContent = idle === 0 ? 'ihned' : idle < 60 ? `${idle} s` : `${num(idle / 60)} min`;
   $('meterThr').style.left = pct(+$('gate_threshold_db').value) + '%';
   $('gateFields').setAttribute('aria-disabled', String(!$('gate_enabled').checked));
   for (const r of document.querySelectorAll('input[type="range"]')) {
@@ -186,7 +196,8 @@ function applySettings(settings, publicUrl) {
   ks.textContent = settings.api_key_env ? 'nastaven v proměnné prostředí GEMINI_API_KEY'
     : settings.api_key_set ? `uložen ${settings.api_key_hint}` : 'chybí';
   $('api_key').disabled = settings.api_key_env;
-  $('api_key').placeholder = settings.api_key_set ? 'Pro změnu vložte nový klíč' : 'Vložte klíč z Google AI Studia';
+  $('api_key').placeholder = settings.api_key_env ? 'Klíč je nastaven na serveru, tady ho změnit nelze'
+    : settings.api_key_set ? 'Pro změnu vložte nový klíč' : 'Vložte klíč z Google AI Studia';
 
   for (const p of document.querySelectorAll('.src-panel')) p.hidden = p.dataset.src !== settings.source;
   $('secureHint').hidden = window.isSecureContext;
@@ -386,13 +397,14 @@ function renderChannels(st) {
     if (ch.status === 'live') {
       const bits = [];
       if (ch.detected) bits.push(`řečník mluví: ${langCs(ch.detected).toLocaleLowerCase("cs")}`);
-      if (ch.audioMinutes) bits.push(`${ch.audioMinutes} min překladu`);
+      if (ch.audioMinutes) bits.push(`${num(ch.audioMinutes)} min překladu`);
       // Audio health: dropouts where Google delivered too late, the buffer that
       // absorbs it now, and how far the audio is behind.
       if (ch.underruns) bits.push(`výpadky zvuku ${ch.underruns}× (vyrovnávací paměť ${ch.prebufferMs} ms)`);
-      if (ch.backlogMs >= 1000) bits.push(`zvuk o ${(ch.backlogMs / 1000).toFixed(1)} s pozadu`);
+      if (ch.backlogMs >= 1000) bits.push(`zvuk o ${num(ch.backlogMs / 1000)} s pozadu`);
       if (ch.stopping) bits.push('bez posluchačů, brzy se ukončí');
-      if (bits.length) text += ', ' + bits.join(', ');
+      // Middle dots, not commas: "1,5 min" already has a decimal comma.
+      if (bits.length) text += ' · ' + bits.join(' · ');
     }
     if (ch.error && ch.status !== 'live') text += `: ${ch.error}`;
     row.meta.textContent = text;
@@ -562,12 +574,12 @@ function connectStatus() {
 
 // ------------------------------------------------------------------ browser ingest
 
-const ING = { active: false, ctx: null, stream: null, node: null, ws: null, wake: null };
+const ING = { active: false, ctx: null, stream: null, node: null, ws: null, wake: null, waking: false };
 
 async function listMics() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   const sel = $('micDevice');
-  const keep = sel.value || localStorage.getItem('lt.admin.mic') || '';
+  const keep = sel.value || store.get('lt.admin.mic');
   let devices = [];
   try { devices = await navigator.mediaDevices.enumerateDevices(); } catch { return; }
   sel.textContent = '';
@@ -643,13 +655,28 @@ async function startIngest() {
     if (ING.ctx.state !== 'running') await ING.ctx.resume();
     ING.active = true;
     openIngestSocket();
-    try { ING.wake = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
+    await keepAwake();
     toast('Zvuk se posílá na server');
   } catch (e) {
     stopIngest();
     toast(e.name === 'NotAllowedError' ? 'Prohlížeč nepovolil přístup ke zvukovému vstupu.' : `Vstup nelze spustit: ${e.message}`, true);
   }
   setIngestUi();
+}
+
+/** A sleeping laptop would stop the broadcast: keep the screen on while sending.
+ *  The browser drops the lock whenever the tab is hidden; it is taken again on return. */
+async function keepAwake() {
+  if (!ING.active || ING.wake || ING.waking || !navigator.wakeLock || document.visibilityState !== 'visible') return;
+  ING.waking = true;
+  try {
+    const lock = await navigator.wakeLock.request('screen');
+    if (!ING.active) { lock.release().catch(() => {}); return; }
+    ING.wake = lock;
+    lock.addEventListener('release', () => { if (ING.wake === lock) ING.wake = null; });
+  } catch { /* optional */ } finally {
+    ING.waking = false;
+  }
 }
 
 function stopIngest() {
@@ -667,24 +694,20 @@ function stopIngest() {
 
 $('ingestBtn').addEventListener('click', () => (ING.active ? stopIngest() : startIngest()));
 $('micDevice').addEventListener('change', () => {
-  localStorage.setItem('lt.admin.mic', $('micDevice').value);
+  store.set('lt.admin.mic', $('micDevice').value);
   if (ING.active) { stopIngest(); startIngest(); }
 });
-try { $('micRoom').checked = localStorage.getItem('lt.admin.micRoom') === '1'; } catch { /* private mode */ }
+$('micRoom').checked = store.get('lt.admin.micRoom') === '1';
 $('micChannel').disabled = $('micRoom').checked;
 $('micRoom').addEventListener('change', () => {
   $('micChannel').disabled = $('micRoom').checked;
-  try { localStorage.setItem('lt.admin.micRoom', $('micRoom').checked ? '1' : '0'); } catch { /* private mode */ }
+  store.set('lt.admin.micRoom', $('micRoom').checked ? '1' : '0');
   if (ING.active) { stopIngest(); startIngest(); }
 });
 $('micChannel').addEventListener('change', () => {
   if (ING.node && !$('micRoom').checked) ING.node.port.postMessage({ channel: parseInt($('micChannel').value, 10) });
 });
-document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible' && ING.active && !ING.wake) {
-    try { ING.wake = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
-  }
-});
+document.addEventListener('visibilitychange', keepAwake);
 window.addEventListener('beforeunload', (e) => {
   if (ING.active) { e.preventDefault(); e.returnValue = ''; }
 });

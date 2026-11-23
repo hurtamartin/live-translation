@@ -9,9 +9,19 @@ let toastTimer = 0;
 export function toast(text, { error = false, info = false, ms } = {}) {
   const box = document.getElementById('toast');
   if (!box) return;
+  // An open sheet is a modal dialog in the browser's top layer and covers the
+  // rest of the page, toast included. As a popover the toast joins the top layer
+  // too; reopening it puts it above a sheet that was opened after it.
+  if (box.showPopover) {
+    try {
+      if (box.matches(':popover-open')) box.hidePopover();
+      box.showPopover();
+    } catch { /* no popover support: plain fixed element */ }
+  }
   box.textContent = text;
   box.classList.toggle('error', error);
   box.classList.toggle('info', info && !error);
+  if (!box.classList.contains('show')) void box.offsetWidth;   // start the entry transition
   box.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => box.classList.remove('show'), ms ?? (error ? 5000 : 2600));

@@ -78,7 +78,7 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 
 | Co | Proč |
 |---|---|
-| Žádný PyTorch (prototyp `capture.py` ho používal) | Převzorkování přes `soxr`, VAD nahrazen šumovou bránou. Image cca 265 MB místo několika GB. |
+| Žádný PyTorch | Převzorkování přes `soxr`, místo neuronového VAD šumová brána. Image cca 265 MB místo několika GB. |
 | Šumová brána s předstihem 300 ms a doběhem | V tichu se do Google nic neposílá: nižší cena i kvóta, první slabika se neusekne. |
 | Relace na vyžádání | Jazyk se připojí ke Gemini až s prvním posluchačem a po nastavené době bez posluchačů se odpojí. „Stále zapnuto“ jen pro hlavní jazyk. |
 | Kódování jednou pro všechny | Zpráva pro Gemini se sestaví jednou pro všechny jazyky, Opus/MP3 se kóduje jednou na jazyk a stejné bajty jdou všem posluchačům. |
@@ -92,6 +92,7 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 | Zamrzlá relace | Když Google na 30 s řeči nic nevrátí, relace se nahradí novou (zvuk z mezery se neztratí). |
 | Hladký takt zvuku | Ukládání nastavení (fsync) běží mimo event loop a GC má zmrazenou haldu, aby nic nezastavilo takt 40 ms. Zaseknutí event loopu se měří a hlásí v administraci i v logu. |
 | Statika | Předkomprimované `.gz`, self-hostovaný font (žádné volání Google Fonts z telefonů), service worker. |
+| Aktualizace aplikace | Server dosadí do `sw.js` otisk webových souborů, takže každé vydání samo obnoví offline kopii v telefonech (žádná verze k ručnímu zvyšování). Stránka načtená ze serveru bere ze serveru i skripty, nikdy nemíchá nové HTML se starými skripty z mezipaměti. |
 
 ## Konfigurace (proměnné prostředí)
 
@@ -147,7 +148,9 @@ uv pip compile requirements.in --universal --python-version 3.12 --generate-hash
 uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes -o requirements-dev.txt
 ```
 
-Ikony: `python tools/make_icons.py`.
+Ikony: `python tools/make_icons.py` (ikona aplikace, maskovatelná ikona pro Android, `apple-touch-icon`
+a čtvercový neprůhledný obrázek `artwork-*.png` pro zamčenou obrazovku: iOS ho zakulatí sám,
+průhledné rohy by tam byly vidět jako bílé trojúhelníky).
 
 ## Struktura
 

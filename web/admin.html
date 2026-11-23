@@ -22,6 +22,8 @@
       <h1>Řízení překladu</h1>
       <p>Konzole operátora živého překladu</p>
     </div>
+    <!-- Lets password managers store the password under a name instead of guessing one. -->
+    <input type="text" name="username" autocomplete="username" value="admin" hidden>
     <label class="field">
       <span>Heslo správce</span>
       <span class="input-wrap">
@@ -316,6 +318,6 @@
   </div>
 </dialog>
 
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" popover="manual"></div>
 </body>
 </html>

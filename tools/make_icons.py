@@ -22,14 +22,16 @@ ARCS = ((110.0, 34.0), (175.0, 34.0))
 ARC_HALF_ANGLE = math.radians(50)
 
 
-def png(path: Path, rgba: np.ndarray) -> None:
-    h, w, _ = rgba.shape
-    raw = b"".join(b"\x00" + rgba[y].tobytes() for y in range(h))
+def png(path: Path, img: np.ndarray) -> None:
+    """Write an RGBA (h, w, 4) or opaque RGB (h, w, 3) image."""
+    h, w, channels = img.shape
+    color_type = 6 if channels == 4 else 2
+    raw = b"".join(b"\x00" + img[y].tobytes() for y in range(h))
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
-    data = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+    data = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, color_type, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
     path.write_bytes(data)
 
@@ -81,6 +83,11 @@ def main() -> None:
     png(OUT / "icon-512.png", render(512, rounded=True))
     png(OUT / "maskable-512.png", render(512, rounded=False, content_scale=0.78))
     png(OUT / "apple-touch-icon.png", render(180, rounded=False, content_scale=0.86))
+    # Lock screen / notification artwork (Media Session). The system draws it as a
+    # square and rounds the corners itself, so it must be full-bleed and opaque:
+    # transparent corners of the rounded app icon show up as white wedges on iOS.
+    for size in (256, 512):
+        png(OUT / f"artwork-{size}.png", render(size, rounded=False, content_scale=0.8)[..., :3])
     cx, cy, r = DOT
     paths = []
     for radius, _ in ARCS:

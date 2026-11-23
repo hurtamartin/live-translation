@@ -7,6 +7,7 @@ import { toast as showToast, closeSheet, wireSheet, copyText, canCopy, haptic } 
 const store = {
   get(k, d = null) { try { const v = localStorage.getItem('lt.' + k); return v === null ? d : v; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('lt.' + k, String(v)); } catch { /* private mode */ } },
+  del(k) { try { localStorage.removeItem('lt.' + k); } catch { /* private mode */ } },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -51,6 +52,7 @@ const S = {
   player: null,
   mode: null,            // 'live' | 'stream'
   audioState: 'idle',    // idle | buffering | playing | paused
+  userPaused: false,     // paused on purpose (lock screen, headset): do not resume by itself
   liveOk: false,
   autoPicked: false,
   wakeLock: null,
@@ -199,7 +201,7 @@ function send(obj) {
 }
 
 function subscribe() {
-  send({ t: 'sub', lang: S.lang, audio: S.mode === 'live' && S.audioState !== 'idle' });
+  send({ t: 'sub', lang: S.lang, audio: S.mode === 'live' && (S.audioState === 'playing' || S.audioState === 'buffering') });
 }
 
 // Mobile networks drop sockets silently; ping and reconnect when answers stop.
@@ -232,7 +234,7 @@ function onMessage(j) {
     case 'info': onInfo(j); break;
     case 'ch':
       if (j.lang !== S.lang) return;
-      if (j.status === 'removed') { toast(t('unavailable'), 'info'); S.lang = null; stopAudio(); clearFeed(); openLangSheet(); }
+      if (j.status === 'removed') langRemoved();
       else S.chStatus = j.status;
       render();
       break;
@@ -243,12 +245,16 @@ function onMessage(j) {
 }
 
 function onInfo(info) {
+  const prev = S.info;
   S.info = info;
   document.title = info.title || document.title;
   el.title.textContent = info.title || '';
   const langs = info.langs || [];
-  S.cached = { title: info.title || '', langs };
+  S.cached = { title: info.title || '', langs, url: info.url || '' };
   store.set('info', JSON.stringify(S.cached));
+  // The operator removed the language this phone was on. The server's "removed"
+  // notice comes after this message, when S.lang is already gone, so handle it here.
+  if (S.lang && !langs.includes(S.lang) && prev && (prev.langs || []).includes(S.lang)) langRemoved();
   // A language-specific QR code carries ?lang=xx.
   const urlLang = new URLSearchParams(location.search).get('lang');
   if (urlLang && !S.autoPicked) {
@@ -256,7 +262,7 @@ function onInfo(info) {
     if (hit) { S.autoPicked = true; if (hit !== S.lang) pickLang(hit, false); }
     history.replaceState(null, '', location.pathname);
   }
-  if (S.lang && !langs.includes(S.lang)) S.lang = null;
+  if (S.lang && !langs.includes(S.lang)) S.lang = null;   // left over from an earlier event
   if (!S.lang && !S.autoPicked) {
     S.autoPicked = true;
     const prefs = (navigator.languages || []).map((l) => l.toLowerCase());
@@ -387,18 +393,18 @@ function render() {
     el.chNative.lang = uiLang;
   }
 
-  // Status line under the language name
+  // Status line under the language name (short words: the line is narrow on phones)
   if (net === 'nonet') setSub(t('noNet'));
   else if (net === 'offline') setSub(t('offAir'));
   else if (!S.connected) setSub(t('connecting'));
   else if (!S.lang) setSub('');
   else if (!onAir) setSub(t('offAir'));
-  else if (S.chStatus === 'error') setSub(t('errTitle'), 'warn');
-  else if (S.chStatus === 'connecting' || S.chStatus === 'reconnecting') setSub(t('startTitle'));
+  else if (S.chStatus === 'error') setSub(t('stError'), 'warn');
+  else if (S.chStatus === 'connecting' || S.chStatus === 'reconnecting') setSub(t('stStarting'));
   else if (S.audioState === 'buffering') setSub(t('loading'), 'live');
   else if (S.audioState === 'playing') setSub(t('playing'), 'live');
   else if (S.audioState === 'paused') setSub(t('resume'));
-  else if (!audioAvailable()) setSub(t('noAudio'));
+  else if (!audioAvailable()) setSub(t('textOnly'));
   else setSub(localName(S.lang) !== nativeName(S.lang) ? localName(S.lang) : t('tapListen'));
 
   // Empty state
@@ -498,6 +504,17 @@ function openLangSheet(focusCode) {
   else target.scrollIntoView({ block: 'nearest' });
 }
 
+/** The language this phone listened to was removed from the event. */
+function langRemoved() {
+  toast(t('unavailable'), 'info');
+  S.lang = null;
+  S.chStatus = 'idle';
+  store.del('lang');
+  stopAudio();
+  clearFeed();
+  openLangSheet();
+}
+
 function pickLang(code, close = true) {
   if (code !== S.lang) {
     S.lang = code;
@@ -546,9 +563,10 @@ async function startAudio() {
   stopAudio(true);
   S.mode = mode;
   setAudioState('buffering');
+  let p = null;
   try {
     if (mode === 'live') {
-      const p = new LivePlayer({
+      p = new LivePlayer({
         onLevel: (rms) => {
           if (S.player !== p) return;
           const lvl = Math.min(0.22, rms * 2.2);
@@ -564,17 +582,21 @@ async function startAudio() {
       });
       S.player = p;
       await p.start();
+      if (S.player !== p) return;   // stopped or replaced while starting
       subscribe();
       if (S.audioState === 'buffering') setAudioState('playing');
     } else {
-      const p = new StreamPlayer(streamUrl(), {
+      p = new StreamPlayer(streamUrl(), {
         onState: (st) => { if (S.player === p) setAudioState(st); },
       });
       S.player = p;
       await p.start();
+      if (S.player !== p) return;
     }
     updateMediaSession();
   } catch (err) {
+    // Stopped or paused while starting: the interrupted start is expected, not an error.
+    if (S.player !== p || S.userPaused) return;
     console.warn('Audio start failed', err);
     if (mode === 'live' && ((S.info && S.info.codecs) || {}).mp3) {
       S.liveOk = false;          // fall back to the stream from now on
@@ -590,6 +612,7 @@ function stopAudio(silent = false) {
   if (S.player) { S.player.stop(); S.player = null; }
   const wasLive = S.mode === 'live';
   S.mode = null;
+  S.userPaused = false;
   S.voice = -1;
   el.dock.style.removeProperty('--amp');
   el.dock.style.removeProperty('--voice');
@@ -601,10 +624,33 @@ function stopAudio(silent = false) {
 async function togglePlay() {
   haptic();
   if (S.audioState === 'paused' && S.player) {
-    try { await S.player.resume(); setAudioState('playing'); return; } catch { /* restart below */ }
+    const p = S.player;
+    S.userPaused = false;
+    if (S.mode === 'stream') setAudioState('buffering');   // reloads at the live edge
+    try {
+      await p.resume();
+      if (S.player !== p || S.userPaused) return;   // stopped or paused again meanwhile
+      setAudioState('playing');
+      if (S.mode === 'live') subscribe();   // frames were switched off while paused
+      return;
+    } catch {
+      if (S.player !== p || S.userPaused) return;   // stopped or paused: nothing to restart
+      await startAudio();                    // the player broke: start a fresh one
+      return;
+    }
   }
   if (S.audioState === 'idle' || S.audioState === 'paused') await startAudio();
   else stopAudio();
+}
+
+/** Pause from the lock screen or a headset button. Unlike stop, the player stays,
+ *  so the lock screen keeps its controls and play resumes from there. */
+function pauseAudio() {
+  if (!S.player || S.audioState === 'idle' || S.audioState === 'paused') return;
+  S.userPaused = true;
+  if (S.mode === 'live') send({ t: 'audio', on: false });
+  Promise.resolve(S.player.pause()).catch(() => {});
+  setAudioState('paused');
 }
 
 function updateMediaSession() {
@@ -613,13 +659,17 @@ function updateMediaSession() {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: (S.info && S.info.title) || document.title,
       artist: nativeName(S.lang),
+      // Square and opaque: the lock screen rounds the corners itself, and the
+      // transparent corners of the app icon would show as white wedges on iOS.
       artwork: [
-        { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
-        { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+        { src: '/icons/artwork-256.png', sizes: '256x256', type: 'image/png' },
+        { src: '/icons/artwork-512.png', sizes: '512x512', type: 'image/png' },
       ],
     });
-    navigator.mediaSession.setActionHandler('play', () => { if (S.audioState !== 'playing') togglePlay(); });
-    navigator.mediaSession.setActionHandler('pause', () => stopAudio());
+    navigator.mediaSession.setActionHandler('play', () => {
+      if (S.audioState === 'idle' || S.audioState === 'paused') togglePlay();
+    });
+    navigator.mediaSession.setActionHandler('pause', pauseAudio);
     navigator.mediaSession.setActionHandler('stop', () => stopAudio());
   } catch { /* unsupported action */ }
 }
@@ -659,10 +709,20 @@ function sizePreviewText() {
   return last || t('waitBody');
 }
 
+/** The address to pass on: the operator's public address when set, the same one
+ *  the server puts in the QR code, so the link and the code never disagree. */
+function shareUrl() {
+  return (S.info && S.info.url) || (S.cached && S.cached.url) || location.origin + '/';
+}
+
 function openSettings() {
-  el.shareUrl.textContent = location.origin + '/';
+  const url = shareUrl();
+  // Shown without the scheme, like on a poster; copy and share pass the full address.
+  el.shareUrl.textContent = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
   // The QR code comes from the server: without it (offline start) the card shows just the link.
-  if (!el.qr.getAttribute('src') && S.connected) el.qr.src = '/api/qr.svg';
+  // The address in the query only makes a changed address load a new code.
+  const qr = '/api/qr.svg?u=' + encodeURIComponent(url);
+  if (S.connected && el.qr.getAttribute('src') !== qr) el.qr.src = qr;
   el.qr.hidden = !el.qr.getAttribute('src');
   el.shareBtn.hidden = !navigator.share;
   el.copyBtn.hidden = !canCopy();
@@ -670,7 +730,7 @@ function openSettings() {
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   el.installBtn.hidden = !S.installEvent;
-  el.installIos.hidden = !(ios && !standalone);
+  el.installIos.hidden = !(ios && !standalone) || !!S.installEvent;
   el.installGroup.hidden = standalone || (!S.installEvent && !ios);
   openSheet(el.settingsSheet);
 }
@@ -682,6 +742,7 @@ el.play.addEventListener('click', togglePlay);
 el.settingsBtn.addEventListener('click', openSettings);
 el.jump.addEventListener('click', scrollToEnd);
 el.qr.addEventListener('error', () => { el.qr.removeAttribute('src'); el.qr.hidden = true; });
+el.qr.addEventListener('load', () => { el.qr.hidden = false; });
 
 el.retryBtn.addEventListener('click', () => {
   haptic();
@@ -723,11 +784,11 @@ el.bgMode.addEventListener('change', () => {
 });
 
 el.copyBtn.addEventListener('click', async () => {
-  if (await copyText(location.origin + '/')) { haptic(); toast(t('copied')); }
+  if (await copyText(shareUrl())) { haptic(); toast(t('copied')); }
 });
 
 el.shareBtn.addEventListener('click', async () => {
-  try { await navigator.share({ title: (S.info && S.info.title) || document.title, url: location.origin + '/' }); }
+  try { await navigator.share({ title: (S.info && S.info.title) || document.title, url: shareUrl() }); }
   catch { /* cancelled */ }
 });
 
@@ -742,8 +803,12 @@ el.installBtn.addEventListener('click', async () => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    if (S.player && S.audioState !== 'idle' && S.player.state !== 'running') {
-      S.player.resume().then(() => setAudioState('playing')).catch(() => setAudioState('paused'));
+    // Back after the system paused the audio (call, other app): carry on, unless the
+    // listener paused it on purpose.
+    if (S.player && S.audioState !== 'idle' && !S.userPaused && S.player.state !== 'running') {
+      const p = S.player;
+      p.resume().then(() => { if (S.player === p) setAudioState('playing'); })
+        .catch(() => { if (S.player === p) setAudioState('paused'); });
     }
     // Back from the pocket: do not wait for the backoff timer, and check that an
     // open-looking socket really still works.
