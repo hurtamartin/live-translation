@@ -20,6 +20,7 @@ from .clients import Client, StreamSink
 from .engine import Engine
 from .languages import LANGUAGES
 from .logbuf import ring
+from .util import every
 
 log = logging.getLogger(__name__)
 
@@ -131,8 +132,10 @@ def _origin_ok(request: web.Request) -> bool:
         allowed.add(_norm_host(urlsplit(configured).netloc))
     if _norm_host(netloc) in allowed:
         return True
-    log.warning("Rejected admin request from origin %s (host %s). If this is your own "
-                "address, set the public address in the admin settings.", origin, request.host)
+    if every("origin-rejected", 30):   # attacker-triggerable: keep the log readable
+        log.warning("Rejected admin request from origin %s (host %s). If this is your own "
+                    "address, set the public address in the admin settings.",
+                    origin[:200], request.host[:200])
     return False
 
 
@@ -322,11 +325,16 @@ async def admin_login(request: web.Request) -> web.Response:
     if not _origin_ok(request):
         return _forbidden()
     auth = request.app[AUTH]
+    expected = _engine(request).store.admin_password
+    if not expected:
+        return web.json_response({"error": "Administrace je vypnutá: na serveru není nastavené "
+                                  "ADMIN_PASSWORD (soubor .env). Nastavte ho a restartujte server."},
+                                 status=503)
     ip = _client_ip(request)
     if auth.blocked(ip):
         return web.json_response({"error": "Příliš mnoho pokusů. Zkuste to za 5 minut."}, status=429)
     data = await _json_body(request)
-    if not auth.check_password(str(data.get("password", "")), _engine(request).store.admin_password):
+    if not auth.check_password(str(data.get("password", "")), expected):
         auth.fail(ip)
         await asyncio.sleep(LOGIN_FAIL_DELAY)
         log.warning("Failed admin login from %s", ip)
@@ -373,10 +381,11 @@ async def admin_config_put(request: web.Request) -> web.Response:
     engine = _engine(request)
     patch = await _json_body(request)
     try:
-        changed = engine.store.patch(patch)
+        changed = engine.store.patch(patch, save=False)
     except (ValueError, TypeError) as e:
         return web.json_response({"error": str(e)}, status=400)
     if changed:
+        await engine.store.save_async()
         log.info("Settings changed: %s", ", ".join(sorted(changed - {"api_key"}))
                  + (" (API key)" if "api_key" in changed else ""))
         await engine.apply(changed)

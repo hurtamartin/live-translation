@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
 import os
 import re
-import secrets
+import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -30,6 +31,8 @@ SOURCES = ("device", "browser", "file", "none")
 DEFAULT_TRUSTED_PROXIES = "127.0.0.0/8,::1/128,172.16.0.0/12"
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+MIN_PASSWORD_LEN = 12
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -116,7 +119,6 @@ class Settings:
     system_instruction: str = ""
     echo_target: bool = False
     public_url: str = ""
-    admin_password: str = ""  # only used when ADMIN_PASSWORD env is not set
 
 
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -178,7 +180,7 @@ def _coerce(name: str, value, current: Settings):
             raise ValueError("Adresa musí začínat http:// nebo https://")
         return value
     limits = {"api_key": 200, "event_title": 80, "device": 200, "file_path": 300,
-              "system_instruction": 4000, "admin_password": 200}
+              "system_instruction": 4000}
     if name in limits:
         value = str(value)
         if name != "system_instruction":
@@ -194,6 +196,11 @@ class SettingsStore:
         self.env = env
         self.path = env.data_dir / "settings.json"
         self.data = Settings()
+        # Saves run in a worker thread (fsync must not stall the audio clock).
+        # Each snapshot gets a version so an older one never overwrites a newer one.
+        self._lock = threading.Lock()
+        self._version = 0
+        self._written = 0
         self._load()
 
     def _read(self) -> dict:
@@ -221,60 +228,87 @@ class SettingsStore:
     def _load(self) -> None:
         self.env.data_dir.mkdir(parents=True, exist_ok=True)
         known = {f.name for f in fields(Settings)}
-        for k, v in self._read().items():
+        raw = self._read()
+        for k, v in raw.items():
             if k in known:
                 try:
                     setattr(self.data, k, _coerce(k, v, self.data))
                 except (ValueError, TypeError, OverflowError):
                     log.warning("Ignoring invalid setting %s", k)
         self.data.always_on = [c for c in self.data.always_on if c in self.data.languages]
-        if not self.env.admin_password and not self.data.admin_password:
-            self.data.admin_password = secrets.token_urlsafe(9)
+        if "admin_password" in raw:
+            # Older versions generated a password and stored it here. The password
+            # now only comes from the environment: remove the stale copy from disk.
             self.save()
-            log.warning("ADMIN_PASSWORD is not set. Generated admin password: %s",
-                        self.data.admin_password)
+        pw = self.env.admin_password
+        if not pw:
+            log.error("ADMIN_PASSWORD is not set: the admin console is disabled. "
+                      "Set it in .env and restart.")
+        elif len(pw) < MIN_PASSWORD_LEN:
+            log.warning("ADMIN_PASSWORD is shorter than %d characters: use a longer one.",
+                        MIN_PASSWORD_LEN)
 
     @property
     def admin_password(self) -> str:
-        return self.env.admin_password or self.data.admin_password
+        """Empty when not configured: then nobody can log in."""
+        return self.env.admin_password
 
     @property
     def api_key(self) -> str:
         return self.env.api_key or self.data.api_key
 
-    def save(self) -> bool:
-        """Atomically persist the settings.
+    def _snapshot(self) -> tuple[int, bytes]:
+        self._version += 1
+        return self._version, json.dumps(asdict(self.data), ensure_ascii=False,
+                                         indent=2).encode("utf-8")
+
+    def _write(self, version: int, data: bytes) -> bool:
+        """Atomically persist one snapshot. Thread-safe.
 
         Never raises: a full or read-only disk must not break the running
         broadcast, the change still applies in memory and the error is logged.
         """
-        data = json.dumps(asdict(self.data), ensure_ascii=False, indent=2).encode("utf-8")
-        tmp = self.path.with_suffix(".tmp")
-        try:
-            # Created 0600 from the start: the file holds the API key.
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError as e:
-            log.error("Could not save settings to %s: %s", self.path, e)
-            return False
-        try:
-            os.chmod(self.path, 0o600)  # files written by older versions
-        except OSError:
-            pass
-        return True
+        with self._lock:
+            if version <= self._written:
+                return True   # a newer snapshot is already on disk
+            tmp = self.path.with_suffix(".tmp")
+            try:
+                # Created 0600 from the start: the file holds the API key.
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.path)
+            except OSError as e:
+                log.error("Could not save settings to %s: %s", self.path, e)
+                return False
+            self._written = version
+            try:
+                os.chmod(self.path, 0o600)  # files written by older versions
+            except OSError:
+                pass
+            return True
 
-    def patch(self, patch: dict) -> set[str]:
-        """Validate and apply a partial update. Returns the names that changed."""
+    def save(self) -> bool:
+        return self._write(*self._snapshot())
+
+    async def save_async(self) -> bool:
+        """save() without blocking the event loop (fsync can take long on slow disks)."""
+        version, data = self._snapshot()
+        return await asyncio.to_thread(self._write, version, data)
+
+    def patch(self, patch: dict, save: bool = True) -> set[str]:
+        """Validate and apply a partial update. Returns the names that changed.
+
+        With save=False the caller persists the change (save_async) itself.
+        """
         if not isinstance(patch, dict):
             raise ValueError("Očekáván JSON objekt.")
         staged = {}
         for k, v in patch.items():
             if k == "admin_password":
-                continue  # not editable through the API
+                continue  # comes from the environment only
             if k == "api_key" and self.env.api_key:
                 continue  # env wins
             try:
@@ -288,13 +322,12 @@ class SettingsStore:
                 changed.add(k)
         if "languages" in changed:
             self.data.always_on = [c for c in self.data.always_on if c in self.data.languages]
-        if changed:
+        if changed and save:
             self.save()
         return changed
 
     def public_view(self) -> dict:
         d = asdict(self.data)
-        d.pop("admin_password", None)
         key = self.api_key
         d["api_key"] = ""
         d["api_key_set"] = bool(key)

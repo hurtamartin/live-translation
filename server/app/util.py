@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Coroutine
 
 log = logging.getLogger(__name__)
 _background: set[asyncio.Task] = set()
+_last: dict[str, float] = {}
+
+
+def every(key: str, seconds: float) -> bool:
+    """True at most once per `seconds` for `key`: rate limit for repetitive log lines.
+
+    Keys must be a small fixed set (never derived from client input).
+    """
+    now = time.monotonic()
+    if now - _last.get(key, float("-inf")) < seconds:
+        return False
+    _last[key] = now
+    return True
 
 
 def spawn(coro: Coroutine, name: str | None = None) -> asyncio.Task:

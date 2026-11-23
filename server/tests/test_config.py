@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import sys
 
@@ -10,11 +12,37 @@ from conftest import make_env
 from app.config import SettingsStore, parse_networks
 
 
-def test_defaults_and_generated_password(tmp_path):
-    store = SettingsStore(make_env(tmp_path, admin_password=""))
-    assert store.admin_password, "a password is generated when none is configured"
+def test_missing_admin_password_is_never_generated(tmp_path, caplog):
+    # settings.json from an older version, which generated a password and stored it
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"admin_password": "old-generated-pw", "event_title": "Akce"}), "utf-8")
+    with caplog.at_level(logging.DEBUG):
+        store = SettingsStore(make_env(tmp_path, admin_password=""))
+    assert store.admin_password == "", "no password configured: admin disabled, nothing invented"
+    assert store.data.event_title == "Akce"
     saved = json.loads((tmp_path / "settings.json").read_text("utf-8"))
-    assert saved["admin_password"] == store.admin_password
+    assert "admin_password" not in saved, "the stale copy is removed from disk"
+    assert "old-generated-pw" not in caplog.text
+    assert "ADMIN_PASSWORD is not set" in caplog.text
+
+
+def test_admin_password_comes_from_env_only(tmp_path):
+    store = SettingsStore(make_env(tmp_path, admin_password="from-env-password"))
+    assert store.admin_password == "from-env-password"
+    assert not (tmp_path / "settings.json").exists(), "nothing written for the password"
+
+
+def test_async_saves_never_go_back_in_time(tmp_path):
+    async def main():
+        store = SettingsStore(make_env(tmp_path))
+        pending = []
+        for i in range(20):
+            store.patch({"event_title": f"v{i}"}, save=False)
+            pending.append(asyncio.ensure_future(store.save_async()))
+        assert all(await asyncio.gather(*pending))
+        saved = json.loads((tmp_path / "settings.json").read_text("utf-8"))
+        assert saved["event_title"] == "v19"
+    asyncio.run(main())
 
 
 def test_patch_validates_and_reports_changes(tmp_path):
