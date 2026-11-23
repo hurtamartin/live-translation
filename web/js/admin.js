@@ -420,7 +420,12 @@ function renderChannels(st) {
 
 function renderInvite() {
   const url = A.settings.public_url || A.publicUrl;
-  $('publicUrlText').textContent = url;
+  // A long address wraps after the scheme, not in the middle of the domain.
+  const box = $('publicUrlText');
+  const m = /^(https?:\/\/)(.+)$/.exec(url);
+  box.textContent = '';
+  if (m) box.append(m[1], document.createElement('wbr'), m[2]);
+  else box.textContent = url;
   const src = '/api/qr.svg?u=' + encodeURIComponent(url);
   if ($('qr').getAttribute('src') !== src) $('qr').src = src;
   $('localhostWarn').hidden = !/\/\/(localhost|127\.|\[::1\])/.test(url);
