@@ -1,9 +1,75 @@
 # Živý překlad
 
+Živý překlad řeči na akcích přímo do telefonů posluchačů. Řečník mluví do mikrofonu jako
+obvykle, posluchači naskenují QR kód, vyberou si jazyk a překlad **čtou i poslouchají** ve
+vlastních sluchátkách. Bez instalace aplikace, bez účtu, bez půjčovny tlumočnických přijímačů.
+
+Překládá model Gemini Live Translate od Googlu. Server běží v Dockeru na vašem počítači nebo
+serveru a jeden zvukový signál překládá současně do tolika jazyků, kolik potřebujete.
+
+<p align="center">
+  <img src="docs/screenshots/listener-dark.png" width="250" alt="Aplikace posluchače: překlad se průběžně zobrazuje a přehrává">
+  &nbsp;
+  <img src="docs/screenshots/listener-languages.png" width="250" alt="Výběr jazyka ve světlém vzhledu">
+</p>
+<p align="center">
+  <img src="docs/screenshots/admin.png" width="820" alt="Konzole operátora: stav vysílání, vstupní signál, jazyky a QR kód">
+</p>
+
+**In English:** live speech translation for events, straight to the listeners' phones. The
+speaker's audio goes through Google's Gemini Live Translate model; listeners scan a QR code, pick
+a language and read and hear the translation. [More below](#in-english).
+
+## Co umí
+
+- **Text i zvuk:** přepis po větách a hlas překladu s nízkým zpožděním, volitelně i původní znění.
+- **Telefon místo přijímače:** webová aplikace, kterou lze přidat na plochu. Rozhraní v 7 jazycích
+  podle telefonu, tmavý i světlý vzhled, velikost písma, hraje i se zamčenou obrazovkou.
+- **78 cílových jazyků.** Každý se připojí k Googlu až s prvním posluchačem a sám se vypne,
+  když nikdo neposlouchá. V tichu se nic neposílá.
+- **Konzole operátora:** zahájení a ukončení vysílání, měřič signálu se šumovou bránou, stav
+  každého jazyka, QR kód k promítnutí na plátno, pokyny pro překlad (terminologie, oslovení).
+- **Zdroj zvuku:** USB rozhraní mixpultu, vstup v prohlížeči operátora, nebo WAV soubor na zkoušku.
+- **Stovky posluchačů na jednom serveru:** zvuk se kóduje jednou pro všechny (Opus kolem 20 kbps).
+- **Spolehlivost:** samo se obnoví spojení s Googlem i s telefony, relace se předává bez výpadku,
+  aplikace se otevře i bez připojení.
+
+## Co budete potřebovat
+
+- Počítač nebo server s **Dockerem** (Linux, nebo Docker Desktop na Windows a macOS).
+- **API klíč Gemini** z [Google AI Studia](https://aistudio.google.com/app/apikey). Používání
+  účtuje Google; každý jazyk je samostatná relace.
+- **Zvuk řečníka:** výstup z mixpultu (třeba samostatný AUX jen s řečníky) přes USB zvukovou
+  kartu, nebo vstup na počítači s prohlížečem.
+- **Síť**, ve které telefony dosáhnou na server: Wi-Fi v sále nebo veřejná adresa. Nejlepší
+  kvalitu dává doména s HTTPS (viz [HTTPS](#https-proč-a-jak)).
+
+## Rychlý start
+
+```bash
+git clone https://github.com/hurtamartin/live-translation.git
+cd live-translation
+cp .env.example .env          # vyplňte ADMIN_PASSWORD (povinné) a GEMINI_API_KEY
+docker compose up -d --build
+```
+
+1. Otevřete konzoli operátora `http://<server>:8080/admin` a přihlaste se heslem z `.env`.
+2. V kartě **Vstupní signál** vyberte zdroj zvuku a ověřte, že měřič reaguje na řeč.
+3. V kartě **Jazyky překladu** přidejte jazyky, do kterých se má překládat.
+4. Vyplňte **Veřejnou adresu**, na které telefony server najdou (z ní se generuje QR kód).
+5. Klikněte na **Zahájit vysílání** a promítněte QR kód tlačítkem **Promítnout QR kód**.
+
+Posluchači otevřou `http://<server>:8080/` nebo naskenují QR kód a vyberou si jazyk.
+
+`ADMIN_PASSWORD` je povinné: bez něj `docker compose` kontejner nespustí. Heslo se nikde
+negeneruje ani nevypisuje do logu. API klíč lze zadat i v administraci; uloží se do svazku
+`/data` (soubor `settings.json`, práva 600).
+
+## Jak to funguje
+
 Signál z mixpultu jde na server v Dockeru, ten ho posílá do modelu Gemini Live Translate
 (`gemini-3.5-live-translate-preview`) a posluchačům na telefony rozesílá přeložený **text i zvuk**.
-Telefony nepotřebují žádný API klíč ani instalaci: stačí naskenovat QR kód. Webovou aplikaci
-lze přidat na plochu jako PWA.
+Telefony nepotřebují žádný API klíč ani instalaci.
 
 ```
  mixpult ──USB──▶ ┌──────────────── Docker: live-translation ─────────────────┐
@@ -18,22 +84,6 @@ lze přidat na plochu jako PWA.
                   │                              └▶ MP3 (jen když poslouchá)──┼─▶ /stream/xx.mp3
                   └───────────────────────────────────────────────────────────┘
 ```
-
-## Rychlý start
-
-```bash
-cp .env.example .env          # vyplňte ADMIN_PASSWORD (povinné) a GEMINI_API_KEY
-docker compose up -d --build
-```
-
-- Posluchači: `http://<server>:8080/`
-- Operátor: `http://<server>:8080/admin`
-
-`ADMIN_PASSWORD` je povinné: bez něj `docker compose` vůbec nespustí kontejner. Heslo se nikde
-negeneruje ani nevypisuje do logu. Server spuštěný mimo compose bez hesla běží, ale administrace
-je vypnutá (přihlášení vrátí chybu s návodem). Starší verze ukládaly vygenerované heslo do
-`settings.json`, při startu se odtud smaže.
-API klíč lze zadat i v administraci; uloží se do svazku `/data` (soubor `settings.json`, práva 600).
 
 ## Odkud server bere zvuk
 
@@ -191,3 +241,38 @@ web/
   nastavení, pokud je Google odmítne, a model lze změnit v administraci.
 - Každý jazyk je samostatná placená relace.
 - Současně běží jeden zdroj zvuku.
+
+## In English
+
+**Živý překlad** ("live translation") brings simultaneous interpretation to events without
+interpreting receivers. The speaker's audio (from the mixing desk, a browser or a WAV file) goes to
+a server in Docker, which streams it to Google's Gemini Live Translate model, one session per
+target language, and sends the translated **text and speech** to the listeners' phones. Listeners
+scan a QR code and pick their language: no app to install, no account. Up to 78 target languages,
+hundreds of listeners per server; a language connects to Google only while someone listens.
+
+The listener app speaks Czech, English, German, Ukrainian, Polish, Spanish and French (it follows
+the phone's language). The operator console and this documentation are in Czech.
+
+```bash
+git clone https://github.com/hurtamartin/live-translation.git
+cd live-translation
+cp .env.example .env          # set ADMIN_PASSWORD (required) and GEMINI_API_KEY
+docker compose up -d --build
+```
+
+Open `http://<server>:8080/admin`, choose the audio source, add languages, set the public address,
+start the broadcast and project the QR code. Listeners open `http://<server>:8080/`. You need a
+[Gemini API key](https://aistudio.google.com/app/apikey); usage is billed by Google. For the best
+audio (low latency, playback with the screen locked) serve it over HTTPS:
+`docker compose --profile https up -d` with `DOMAIN` set in `.env`.
+
+## Licence
+
+Kód je pod licencí [MIT](LICENSE): můžete ho volně používat, upravovat i nasadit komerčně,
+stačí zachovat údaj o autorských právech.
+
+Přibalené písmo Barlow Condensed je pod licencí SIL Open Font License 1.1
+([`web/fonts/OFL.txt`](web/fonts/OFL.txt)). Docker image obsahuje knihovny třetích stran pod
+jejich vlastními licencemi, mimo jiné aiohttp (Apache 2.0), NumPy a libopus (BSD), PortAudio (MIT),
+LAME a soxr (LGPL).
