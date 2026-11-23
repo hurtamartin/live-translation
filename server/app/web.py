@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import io
 import ipaddress
 import json
 import logging
+import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import segno
@@ -230,6 +233,32 @@ async def manifest(request: web.Request) -> web.Response:
     }
     return web.Response(text=json.dumps(body, ensure_ascii=False),
                         content_type="application/manifest+json")
+
+
+_SW_VERSION = re.compile(rb"const VERSION = '[^']*';")
+
+
+@functools.lru_cache(maxsize=4)
+def _service_worker(web_dir: Path) -> bytes:
+    """sw.js with its cache name derived from the content of the web files.
+
+    Any release that changes a file changes sw.js, so phones install a fresh
+    offline copy and drop the old one: no version to remember to bump by hand.
+    """
+    h = hashlib.sha256()
+    for p in sorted(web_dir.rglob("*")):
+        if p.is_file() and p.suffix != ".gz":
+            h.update(p.relative_to(web_dir).as_posix().encode() + b"\0" + p.read_bytes())
+    src = (web_dir / "sw.js").read_bytes()
+    return _SW_VERSION.sub(f"const VERSION = 'lt-{h.hexdigest()[:16]}';".encode(), src, count=1)
+
+
+async def service_worker(request: web.Request) -> web.Response:
+    try:
+        body = await asyncio.to_thread(_service_worker, _engine(request).env.web_dir)
+    except OSError:
+        raise web.HTTPNotFound()
+    return web.Response(body=body, content_type="text/javascript", charset="utf-8")
 
 
 @functools.lru_cache(maxsize=16)
@@ -480,6 +509,7 @@ def create_app(engine: Engine) -> web.Application:
     r.add_get("/healthz", healthz)
     r.add_get("/api/info", api_info)
     r.add_get("/manifest.webmanifest", manifest)
+    r.add_get("/sw.js", service_worker)
     r.add_get("/api/qr.svg", qr_svg)
     r.add_get("/ws", ws_listener)
     r.add_get("/stream/{lang}.mp3", stream_mp3, allow_head=False)

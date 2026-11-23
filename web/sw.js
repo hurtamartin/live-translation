@@ -1,5 +1,8 @@
 // Service worker: app shell offline, never touches live data.
-const VERSION = 'lt-1.2.0';
+// The server replaces VERSION with a hash of the web files when it serves this
+// file, so every release that changes a file installs a fresh offline copy on the
+// phones and drops the old one. Nothing to bump by hand.
+const VERSION = 'lt-dev';
 const SHELL = [
   '/',
   '/css/base.css',
@@ -8,11 +11,14 @@ const SHELL = [
   '/js/i18n.js',
   '/js/ui.js',
   '/js/theme.js',
+  '/js/viewport.js',
   '/js/player.js',
   '/js/player-worklet.js',
   '/icons/icon.svg',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
+  '/icons/artwork-256.png',
+  '/icons/artwork-512.png',
   '/fonts/barlow-condensed-600-latin.woff2',
   '/fonts/barlow-condensed-600-latin-ext.woff2',
   '/manifest.webmanifest',
@@ -24,6 +30,16 @@ const ADMIN = /^\/(css\/admin\.css|js\/(admin|ingest-worklet)\.js)$/;
 // A switched-off server often does not refuse the connection, so without this the
 // phone would sit on a blank splash screen until the network stack gives up.
 const NAV_TIMEOUT = 2500;
+
+// Pages whose HTML just came from the server load their scripts and styles from
+// the server too: right after a release, new HTML must never run with old cached
+// scripts. Pages opened from the offline copy stay on the offline copy.
+const fresh = new Set();
+function markFresh(id) {
+  if (!id) return;
+  fresh.add(id);
+  if (fresh.size > 32) fresh.delete(fresh.values().next().value);
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -55,11 +71,16 @@ self.addEventListener('fetch', (event) => {
       });
       event.waitUntil(network.then(() => {}, () => {}));
       const cached = await cache.match('/');
-      if (!cached) return network.catch(() => Response.error());
+      if (!cached) {
+        return network.then((res) => { markFresh(event.resultingClientId); return res; }, () => Response.error());
+      }
       let timer;
-      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(cached), NAV_TIMEOUT); });
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), NAV_TIMEOUT); });
       try {
-        return await Promise.race([network, late]);
+        const res = await Promise.race([network, late]);
+        if (!res) return cached;
+        markFresh(event.resultingClientId);
+        return res;
       } catch {
         return cached;
       } finally {
@@ -69,15 +90,25 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-while-revalidate for static assets.
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
+    if (fresh.has(event.clientId)) {
+      // The page itself is the current release: so must be its files.
+      try {
+        const res = await fetch(req);
+        if (res.ok) event.waitUntil(cache.put(req, res.clone()));
+        return res;
+      } catch {
+        return (await cache.match(req)) || Response.error();
+      }
+    }
+    // Stale-while-revalidate for a page running from the offline copy.
     const cached = await cache.match(req);
-    const fresh = fetch(req).then((res) => {
+    const update = fetch(req).then((res) => {
       if (res.ok) cache.put(req, res.clone());
       return res;
-    }).catch(() => cached || Response.error());
-    event.waitUntil(fresh.then(() => {}, () => {}));
-    return cached || fresh;
+    });
+    event.waitUntil(update.then(() => {}, () => {}));
+    return cached || update.catch(() => Response.error());
   })());
 });

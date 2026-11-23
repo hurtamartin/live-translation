@@ -304,3 +304,40 @@ def test_qr_and_static(tmp_path):
             r = await client.get("/../server/app/config.py")
             assert r.status in (403, 404)
     asyncio.run(main())
+
+
+def test_listeners_learn_the_public_address(tmp_path):
+    """Phones share the operator's public address, the one in the QR code."""
+    async def main():
+        async with running(tmp_path) as (client, engine):
+            ws = await client.ws_connect("/ws")
+            info = await recv_until(ws, lambda j: j["t"] == "info")
+            assert info["url"] == ""
+            await login(client)
+            await client.put("/api/admin/config", json={"public_url": "https://preklad.example.cz/"})
+            info = await recv_until(ws, lambda j: j["t"] == "info")
+            assert info["url"] == "https://preklad.example.cz/"
+            r = await client.get("/api/qr.svg")
+            assert r.headers["X-Public-Url"] == info["url"]
+            await ws.close()
+    asyncio.run(main())
+
+
+def test_service_worker_version_follows_web_files(tmp_path):
+    """Any change to the web files changes sw.js, so phones refresh their offline copy."""
+    async def main():
+        web_dir = tmp_path / "web"
+        web_dir.mkdir()
+        (web_dir / "index.html").write_text("<!doctype html>v1", "utf-8")
+        (web_dir / "sw.js").write_text("const VERSION = 'lt-dev';\nself;\n", "utf-8")
+        async with running(tmp_path, web_dir=web_dir) as (client, engine):
+            r = await client.get("/sw.js")
+            assert r.status == 200 and r.content_type == "text/javascript"
+            first = await r.text()
+            assert "lt-dev" not in first and first.startswith("const VERSION = 'lt-")
+        (web_dir / "index.html").write_text("<!doctype html>v2", "utf-8")
+        appweb._service_worker.cache_clear()   # a new release means a new server process
+        async with running(tmp_path, web_dir=web_dir) as (client, engine):
+            second = await (await client.get("/sw.js")).text()
+        assert second != first
+    asyncio.run(main())

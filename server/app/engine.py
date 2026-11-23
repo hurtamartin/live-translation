@@ -164,7 +164,7 @@ class Engine:
         if changed & {"on_air", "always_on", "idle_stop_s"}:
             for ch in self.channels.values():
                 ch.update_demand()
-        if changed & {"event_title", "on_air", "languages"}:
+        if changed & {"event_title", "on_air", "languages", "public_url"}:
             self.broadcast_info()
         if "on_air" in changed:
             log.info("Broadcast %s", "started" if self.settings.on_air else "stopped")
@@ -238,6 +238,9 @@ class Engine:
             "title": s.event_title,
             "onAir": s.on_air,
             "langs": s.languages,
+            # The operator's public address (empty when not set): phones share this
+            # link, the same one the server puts in the QR code.
+            "url": s.public_url,
             "codecs": codecs(),
             "v": __version__,
         }, ensure_ascii=False)
