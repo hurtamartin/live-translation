@@ -13,7 +13,5 @@ deploy/
 tools/
 server/tests/
 **/.pytest_cache/
-capture.py
-index.html
 .vscode/
 .idea/
