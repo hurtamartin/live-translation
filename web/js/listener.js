@@ -13,6 +13,7 @@ const $ = (id) => document.getElementById(id);
 const el = {
   title: $('title'), onair: $('onair'), onairText: $('onairText'), banner: $('banner'), bannerText: $('bannerText'),
   feed: $('feed'), feedInner: $('feedInner'), empty: $('empty'), emptyTitle: $('emptyTitle'), emptyBody: $('emptyBody'),
+  retryBtn: $('retryBtn'),
   jump: $('jump'), jumpText: $('jumpText'), dock: $('dock'),
   channelBtn: $('channelBtn'), chCode: $('chCode'), chNative: $('chNative'), chSub: $('chSub'),
   play: $('play'), playLabel: $('playLabel'), settingsBtn: $('settingsBtn'), settingsLabel: $('settingsLabel'),
@@ -24,16 +25,27 @@ const el = {
 };
 
 const SIZES = ['1.05rem', '1.3rem', '1.6rem', '1.95rem', '2.4rem'];
+const CONNECT_TIMEOUT = 6000;   // a server that is switched off often never refuses: do not hang
+
+function readCachedInfo() {
+  try { const v = JSON.parse(store.get('info', 'null')); return v && typeof v === 'object' ? v : null; } catch { return null; }
+}
 
 const S = {
   info: null,
+  cached: readCachedInfo(),   // title and languages from the last visit, for offline starts
   lang: store.get('lang'),
   chStatus: 'idle',
   connected: false,
   everConnected: false,
   ws: null,
-  retry: 0,
+  fails: 0,                   // failed attempts since the last successful connection
+  retryTimer: 0,
+  probing: false,             // a retry the listener asked for is in flight
   lastMsg: 0,
+  emptyState: null,
+  voice: -1,
+  keyboard: false,
   segs: new Map(),
   nowSeg: null,
   player: null,
@@ -66,6 +78,8 @@ function applyStaticText() {
   el.installIos.textContent = t('installIos');
   el.jumpText.textContent = t('jump');
   el.bannerText.textContent = t('reconnecting');
+  $('retryText').textContent = t('retry');
+  if (S.cached && S.cached.title) { el.title.textContent = S.cached.title; document.title = S.cached.title; }
   for (const b of el.themes.querySelectorAll('button')) b.querySelector('span').textContent = t(b.dataset.themeSet);
   for (const b of document.querySelectorAll('[data-close]')) b.setAttribute('aria-label', t('close'));
   SIZES.forEach((_, i) => {
@@ -100,18 +114,32 @@ function wsUrl() {
 }
 
 function connect() {
-  const ws = new WebSocket(wsUrl());
+  clearTimeout(S.retryTimer);
+  S.retryTimer = 0;
+  let ws;
+  try { ws = new WebSocket(wsUrl()); } catch {
+    S.fails++;
+    S.probing = false;
+    render();
+    scheduleRetry();
+    return;
+  }
   ws.binaryType = 'arraybuffer';
   S.ws = ws;
+  const deadline = setTimeout(() => { if (ws.readyState === WebSocket.CONNECTING) ws.close(); }, CONNECT_TIMEOUT);
   ws.onopen = () => {
+    clearTimeout(deadline);
+    if (S.ws !== ws) { ws.close(); return; }
     S.connected = true;
     S.everConnected = true;
-    S.retry = 0;
+    S.fails = 0;
+    S.probing = false;
     S.lastMsg = Date.now();
     if (S.lang) subscribe();
     render();
   };
   ws.onmessage = (e) => {
+    if (S.ws !== ws) return;
     S.lastMsg = Date.now();
     if (typeof e.data === 'string') {
       let j;
@@ -122,14 +150,48 @@ function connect() {
     }
   };
   ws.onclose = () => {
+    clearTimeout(deadline);
     if (S.ws !== ws) return;
     S.ws = null;
     S.connected = false;
+    S.probing = false;
+    S.fails++;
     render();
-    const delay = Math.min(500 * 2 ** S.retry++, 8000);
-    setTimeout(connect, delay);
+    scheduleRetry();
   };
   ws.onerror = () => { /* onclose follows */ };
+}
+
+// Exponential backoff with jitter, so hundreds of phones do not all hit a
+// restarted server in the same instant.
+function scheduleRetry() {
+  clearTimeout(S.retryTimer);
+  const base = Math.min(500 * 2 ** Math.min(Math.max(S.fails - 1, 0), 4), 8000);
+  S.retryTimer = setTimeout(connect, base * (0.75 + Math.random() * 0.5));
+}
+
+/** Try right away: network is back, the page is visible again, or "Try again" was tapped. */
+function reconnectNow() {
+  if (S.connected || (S.ws && S.ws.readyState === WebSocket.CONNECTING)) return;
+  connect();
+}
+
+/** Abandon a socket that went silent (phone slept, Wi-Fi changed) and dial again. */
+function restartSocket() {
+  const ws = S.ws;
+  S.ws = null;
+  S.connected = false;
+  if (ws) { ws.onclose = null; try { ws.close(); } catch { /* already closed */ } }
+  render();
+  connect();
+}
+
+/** Ask the server for a sign of life; restart if none comes back quickly. */
+function probe() {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  const sent = Date.now();
+  send({ t: 'ping' });
+  setTimeout(() => { if (S.connected && S.lastMsg < sent) restartSocket(); }, 4000);
 }
 
 function send(obj) {
@@ -143,9 +205,25 @@ function subscribe() {
 // Mobile networks drop sockets silently; ping and reconnect when answers stop.
 setInterval(() => {
   if (!S.ws || S.ws.readyState !== 1) return;
-  if (Date.now() - S.lastMsg > 35000) { S.ws.close(); return; }
+  if (Date.now() - S.lastMsg > 35000) { restartSocket(); return; }
   send({ t: 'ping' });
 }, 15000);
+
+/**
+ * Connection as the listener should see it:
+ *  online       - connected to the server
+ *  connecting   - first attempt (or a retry the listener asked for) is running
+ *  reconnecting - just lost the connection, trying again
+ *  offline      - the server cannot be reached: nothing is being broadcast
+ *  nonet        - the phone itself has no network
+ */
+function netState() {
+  if (S.connected) return 'online';
+  if (navigator.onLine === false) return 'nonet';
+  if (S.probing || (!S.everConnected && S.fails === 0)) return 'connecting';
+  if (S.everConnected && S.fails < 2) return 'reconnecting';
+  return 'offline';
+}
 
 // ------------------------------------------------------------------ messages
 
@@ -154,7 +232,7 @@ function onMessage(j) {
     case 'info': onInfo(j); break;
     case 'ch':
       if (j.lang !== S.lang) return;
-      if (j.status === 'removed') { toast(t('unavailable')); S.lang = null; stopAudio(); clearFeed(); openLangSheet(); }
+      if (j.status === 'removed') { toast(t('unavailable'), 'info'); S.lang = null; stopAudio(); clearFeed(); openLangSheet(); }
       else S.chStatus = j.status;
       render();
       break;
@@ -169,6 +247,8 @@ function onInfo(info) {
   document.title = info.title || document.title;
   el.title.textContent = info.title || '';
   const langs = info.langs || [];
+  S.cached = { title: info.title || '', langs };
+  store.set('info', JSON.stringify(S.cached));
   // A language-specific QR code carries ?lang=xx.
   const urlLang = new URLSearchParams(location.search).get('lang');
   if (urlLang && !S.autoPicked) {
@@ -276,10 +356,23 @@ function setSub(text, tone = '') {
 function render() {
   const info = S.info;
   const onAir = !!(info && info.onAir);
-  el.onair.dataset.state = onAir && S.connected ? 'live' : 'off';
-  el.onairText.textContent = onAir ? t('live') : t('offAir');
+  const net = netState();
+  const hasText = S.segs.size > 0;
 
-  el.banner.hidden = S.connected || !S.everConnected;
+  // On-air pill: hidden until the server answers, kept as it was during a short reconnect.
+  if (net === 'online' && info) {
+    el.onair.dataset.state = onAir ? 'live' : 'off';
+    el.onairText.textContent = onAir ? t('live') : t('offAir');
+  } else if (net === 'offline' || net === 'nonet') {
+    el.onair.dataset.state = 'off';
+    el.onairText.textContent = net === 'nonet' ? t('noNet') : t('offAir');
+  } else if (el.onair.dataset.state === 'live') {
+    el.onair.dataset.state = 'off';
+  }
+
+  // Lost connection with a transcript on screen: a quiet banner, the text stays readable.
+  el.banner.hidden = !(hasText && !S.connected);
+  el.bannerText.textContent = net === 'nonet' ? t('noNetTitle') : net === 'offline' ? t('serverDown') : t('reconnecting');
 
   // Channel readout
   if (S.lang) {
@@ -295,8 +388,10 @@ function render() {
   }
 
   // Status line under the language name
-  if (!S.connected) setSub(S.everConnected ? t('reconnecting') : t('connecting'));
-  else if (!S.lang) setSub(t('changeLang'));
+  if (net === 'nonet') setSub(t('noNet'));
+  else if (net === 'offline') setSub(t('offAir'));
+  else if (!S.connected) setSub(t('connecting'));
+  else if (!S.lang) setSub('');
   else if (!onAir) setSub(t('offAir'));
   else if (S.chStatus === 'error') setSub(t('errTitle'), 'warn');
   else if (S.chStatus === 'connecting' || S.chStatus === 'reconnecting') setSub(t('startTitle'));
@@ -307,11 +402,12 @@ function render() {
   else setSub(localName(S.lang) !== nativeName(S.lang) ? localName(S.lang) : t('tapListen'));
 
   // Empty state
-  const hasText = S.segs.size > 0;
   el.empty.hidden = hasText;
   if (!hasText) {
     let title, body, state;
-    if (!S.connected) { title = t('connecting'); body = ''; state = 'connecting'; }
+    if (net === 'nonet') { title = t('noNetTitle'); body = t('noNetBody'); state = 'nonet'; }
+    else if (net === 'offline') { title = t('offlineTitle'); body = t('offlineBody'); state = 'offline'; }
+    else if (!S.connected) { title = S.everConnected ? t('reconnecting') : t('connecting'); body = ''; state = 'connecting'; }
     else if (!S.lang) { title = t('chooseLang'); body = t('chooseHint'); state = 'choose'; }
     else if (!onAir) { title = t('offTitle'); body = t('offBody'); state = 'off'; }
     else if (S.chStatus === 'error') { title = t('errTitle'); body = t('errBody'); state = 'error'; }
@@ -319,19 +415,30 @@ function render() {
     else { title = t('waitTitle'); body = t('waitBody'); state = 'waiting'; }
     el.emptyTitle.textContent = title;
     el.emptyBody.textContent = body;
-    el.empty.dataset.state = state;
+    el.emptyBody.hidden = !body;
+    el.retryBtn.hidden = state !== 'offline' && state !== 'nonet';
+    if (state !== S.emptyState) {
+      // Fade the new message in (a quick "connecting" never shows: see listener.css).
+      S.emptyState = state;
+      el.empty.dataset.state = state;
+      el.empty.classList.remove('in');
+      void el.empty.offsetWidth;
+      el.empty.classList.add('in');
+    }
+  } else {
+    S.emptyState = null;
   }
 
   // Play button
   el.dock.dataset.audio = S.audioState;
   el.play.dataset.state = S.audioState === 'paused' ? 'idle' : S.audioState;
-  el.play.disabled = !S.lang || !audioAvailable();
+  el.play.disabled = !S.lang || !audioAvailable() || (!S.connected && S.audioState === 'idle');
   el.playLabel.textContent = S.audioState === 'idle' || S.audioState === 'paused' ? t('listen') : t('stop');
   updateWakeLock();
 }
 
 function renderLangList() {
-  const langs = (S.info && S.info.langs) || [];
+  const langs = (S.info && S.info.langs) || (S.cached && S.cached.langs) || [];
   el.langList.textContent = '';
   if (!langs.length) {
     const li = document.createElement('li');
@@ -372,12 +479,23 @@ function renderLangList() {
 
 // ------------------------------------------------------------------ language
 
+/** showModal() focuses the first button and browsers then draw a focus ring on it
+ *  even after a tap. On touch the sheet itself takes focus instead. */
+function openSheet(dlg) {
+  if (dlg.open) return;
+  dlg.showModal();
+  if (!S.keyboard) dlg.focus({ preventScroll: true });
+}
+
 function openLangSheet(focusCode) {
   renderLangList();
-  if (!el.langSheet.open) el.langSheet.showModal();
+  openSheet(el.langSheet);
   const target = el.langList.querySelector(`[data-lang="${CSS.escape(focusCode || S.lang || '')}"]`)
     || el.langList.querySelector('button');
-  if (target) target.focus();
+  if (!target) return;
+  // Keyboard users land on the list; on touch the sheet itself keeps focus (no stray ring).
+  if (S.keyboard) target.focus();
+  else target.scrollIntoView({ block: 'nearest' });
 }
 
 function pickLang(code, close = true) {
@@ -434,8 +552,13 @@ async function startAudio() {
         onLevel: (rms) => {
           if (S.player !== p) return;
           const lvl = Math.min(0.22, rms * 2.2);
-          el.play.style.setProperty('--lvl', (1 + lvl).toFixed(3));
           el.dock.style.setProperty('--amp', (0.25 + lvl * 3.4).toFixed(3));
+          // The ripples around play fade down in pauses and swell back with the voice.
+          const voice = Math.min(1, 0.15 + rms * 10);
+          if (Math.abs(voice - S.voice) > 0.05) {
+            S.voice = voice;
+            el.dock.style.setProperty('--voice', voice.toFixed(2));
+          }
         },
         onState: (st) => { if (S.player === p && st !== 'running' && S.audioState !== 'idle') setAudioState('paused'); },
       });
@@ -459,7 +582,7 @@ async function startAudio() {
       return startAudio();
     }
     stopAudio();
-    toast(t('noAudio'), true);
+    toast(t('noAudio'), 'error');
   }
 }
 
@@ -467,8 +590,9 @@ function stopAudio(silent = false) {
   if (S.player) { S.player.stop(); S.player = null; }
   const wasLive = S.mode === 'live';
   S.mode = null;
-  el.play.style.removeProperty('--lvl');
+  S.voice = -1;
   el.dock.style.removeProperty('--amp');
+  el.dock.style.removeProperty('--voice');
   if (wasLive) send({ t: 'audio', on: false });
   if (!silent) setAudioState('idle');
   else S.audioState = 'idle';
@@ -504,8 +628,10 @@ function updateMediaSession() {
 
 async function updateWakeLock() {
   if (!('wakeLock' in navigator)) return;
+  // No point keeping the screen lit while the server is unreachable.
   const want = el.keepAwake.checked && document.visibilityState === 'visible'
-    && !!(S.info && S.info.onAir) && !(S.mode === 'stream' && S.audioState !== 'idle');
+    && !!(S.info && S.info.onAir) && netState() !== 'offline' && netState() !== 'nonet'
+    && !(S.mode === 'stream' && S.audioState !== 'idle');
   if (want && !S.wakeLock) {
     S.wakeLock = 'pending';
     try {
@@ -522,8 +648,10 @@ async function updateWakeLock() {
 
 // ------------------------------------------------------------------ misc UI
 
-function toast(text, error = false) {
-  showToast(text, { error, ms: error ? 4500 : 3200 });
+/** tone: '' (done), 'info' or 'error'. */
+function toast(text, tone = '') {
+  const error = tone === 'error';
+  showToast(text, { error, info: tone === 'info', ms: error ? 4500 : 3200 });
 }
 
 function sizePreviewText() {
@@ -533,9 +661,9 @@ function sizePreviewText() {
 
 function openSettings() {
   el.shareUrl.textContent = location.origin + '/';
-  if (!el.qr.src) {
-    el.qr.src = '/api/qr.svg';
-  }
+  // The QR code comes from the server: without it (offline start) the card shows just the link.
+  if (!el.qr.getAttribute('src') && S.connected) el.qr.src = '/api/qr.svg';
+  el.qr.hidden = !el.qr.getAttribute('src');
   el.shareBtn.hidden = !navigator.share;
   el.copyBtn.hidden = !canCopy();
   el.sizePreview.textContent = sizePreviewText();
@@ -544,7 +672,7 @@ function openSettings() {
   el.installBtn.hidden = !S.installEvent;
   el.installIos.hidden = !(ios && !standalone);
   el.installGroup.hidden = standalone || (!S.installEvent && !ios);
-  el.settingsSheet.showModal();
+  openSheet(el.settingsSheet);
 }
 
 // ------------------------------------------------------------------ events
@@ -553,6 +681,20 @@ el.channelBtn.addEventListener('click', () => openLangSheet());
 el.play.addEventListener('click', togglePlay);
 el.settingsBtn.addEventListener('click', openSettings);
 el.jump.addEventListener('click', scrollToEnd);
+el.qr.addEventListener('error', () => { el.qr.removeAttribute('src'); el.qr.hidden = true; });
+
+el.retryBtn.addEventListener('click', () => {
+  haptic();
+  S.probing = true;
+  render();
+  reconnectNow();
+});
+window.addEventListener('online', () => { render(); reconnectNow(); });
+window.addEventListener('offline', render);
+
+// Focus rings and list focus only for keyboard users.
+document.addEventListener('keydown', (e) => { if (e.key === 'Tab' || e.key === 'Enter' || e.key === ' ') S.keyboard = true; }, true);
+document.addEventListener('pointerdown', () => { S.keyboard = false; }, true);
 el.feed.addEventListener('scroll', () => { if (nearBottom()) el.jump.hidden = true; }, { passive: true });
 
 el.langList.addEventListener('click', (e) => {
@@ -603,7 +745,9 @@ document.addEventListener('visibilitychange', () => {
     if (S.player && S.audioState !== 'idle' && S.player.state !== 'running') {
       S.player.resume().then(() => setAudioState('playing')).catch(() => setAudioState('paused'));
     }
-    if (S.ws === null && !S.connected) { /* reconnect loop is already scheduled */ }
+    // Back from the pocket: do not wait for the backoff timer, and check that an
+    // open-looking socket really still works.
+    if (S.connected) probe(); else reconnectNow();
   }
   updateWakeLock();
 });

@@ -1,5 +1,5 @@
 // Service worker: app shell offline, never touches live data.
-const VERSION = 'lt-1.1.0';
+const VERSION = 'lt-1.2.0';
 const SHELL = [
   '/',
   '/css/base.css',
@@ -20,6 +20,10 @@ const SHELL = [
 const LIVE = /^\/(api|ws|stream|admin)(\/|$)|^\/healthz$/;
 // Operator console is online-only: always fetch its files fresh.
 const ADMIN = /^\/(css\/admin\.css|js\/(admin|ingest-worklet)\.js)$/;
+// How long a page load waits for the server before the cached app opens instead.
+// A switched-off server often does not refuse the connection, so without this the
+// phone would sit on a blank splash screen until the network stack gives up.
+const NAV_TIMEOUT = 2500;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -39,14 +43,27 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin || LIVE.test(url.pathname) || ADMIN.test(url.pathname)) return;
 
   if (req.mode === 'navigate') {
-    // Network first so a new version shows up immediately; cache when offline.
+    // Network first so a new version shows up immediately; the cached shell when
+    // the server is slow or unreachable, so the app always opens.
     event.respondWith((async () => {
-      try {
-        const res = await fetch(req);
-        if (res.ok && url.pathname === '/') (await caches.open(VERSION)).put('/', res.clone());
+      const cache = await caches.open(VERSION);
+      const network = fetch(req).then((res) => {
+        if (res.ok && url.pathname === '/') cache.put('/', res.clone());
+        // A reverse proxy answers 502/503 while the app container is down: open the app anyway.
+        if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
         return res;
+      });
+      event.waitUntil(network.then(() => {}, () => {}));
+      const cached = await cache.match('/');
+      if (!cached) return network.catch(() => Response.error());
+      let timer;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(cached), NAV_TIMEOUT); });
+      try {
+        return await Promise.race([network, late]);
       } catch {
-        return (await caches.match('/')) || Response.error();
+        return cached;
+      } finally {
+        clearTimeout(timer);
       }
     })());
     return;

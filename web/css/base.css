@@ -141,15 +141,20 @@ body {
 }
 
 button, input, select, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
+/* Browsers pad buttons by default (1px 6px), which pushes absolutely placed
+   decorations off-centre. Components set their own padding. */
+button { cursor: pointer; padding: 0; touch-action: manipulation; }
 button:disabled { cursor: not-allowed; opacity: 0.5; }
 [hidden] { display: none !important; }
 ::selection { background: var(--signal-glow); }
 
+/* Keyboard focus only; a tap or click never leaves a ring behind. */
+:focus { outline: none; }
 :focus-visible {
-  outline: 3px solid var(--signal);
-  outline-offset: 2px;
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
 }
+dialog:focus-visible { outline: none; }
 
 .visually-hidden {
   position: absolute !important;
@@ -180,7 +185,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   white-space: nowrap;
   transition: background-color 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.12s var(--ease), filter 0.18s;
 }
-.btn:hover:not(:disabled) { border-color: var(--line-strong); }
 .btn:active:not(:disabled) { transform: scale(0.97); }
 .btn.primary {
   background: linear-gradient(180deg, var(--signal-2), var(--signal));
@@ -188,17 +192,24 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   border-color: transparent;
   box-shadow: 0 6px 18px -6px var(--signal-glow), inset 0 1px 0 rgb(255 255 255 / 0.35);
 }
-.btn.primary:hover:not(:disabled) { filter: brightness(1.05); box-shadow: 0 8px 24px -6px var(--signal-glow), inset 0 1px 0 rgb(255 255 255 / 0.35); }
 .btn.danger {
   background: var(--danger);
   color: var(--danger-ink);
   border-color: transparent;
   box-shadow: 0 6px 18px -8px var(--danger);
 }
-.btn.danger:hover:not(:disabled) { filter: brightness(1.06); }
 .btn.ghost { background: transparent; }
-.btn.ghost:hover:not(:disabled) { background: var(--panel-2); }
 .btn svg { width: 18px; height: 18px; flex: none; }
+
+/* Hover styles only where a pointer can hover: on phones they would stick after a tap. */
+@media (hover: hover) {
+  .btn:hover:not(:disabled) { border-color: var(--line-strong); }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.05); box-shadow: 0 8px 24px -6px var(--signal-glow), inset 0 1px 0 rgb(255 255 255 / 0.35); }
+  .btn.danger:hover:not(:disabled) { filter: brightness(1.06); }
+  .btn.ghost:hover:not(:disabled) { background: var(--panel-2); }
+  .icon-btn:hover:not(:disabled) { border-color: var(--line-strong); }
+  .segmented button:hover { color: var(--text); }
+}
 
 .icon-btn {
   width: 48px; height: 48px;
@@ -212,7 +223,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   flex: none;
   transition: background-color 0.18s, border-color 0.18s, transform 0.12s var(--ease);
 }
-.icon-btn:hover:not(:disabled) { border-color: var(--line-strong); }
 .icon-btn:active:not(:disabled) { transform: scale(0.94); }
 .icon-btn svg { width: 22px; height: 22px; }
 
@@ -286,7 +296,6 @@ input[type="checkbox"].switch:disabled { opacity: 0.45; cursor: not-allowed; }
   font-weight: 600;
   transition: background-color 0.2s var(--ease), color 0.2s, box-shadow 0.2s;
 }
-.segmented button:hover { color: var(--text); }
 .segmented button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: var(--shadow-m); }
 .segmented svg {
   width: 17px; height: 17px;
@@ -417,6 +426,9 @@ dialog.sheet.closing::backdrop { animation: fade-out 0.22s ease-in forwards; }
 .toast.error { background: var(--danger); color: var(--danger-ink); }
 .toast.error::before {
   background: rgb(255 255 255 / 0.25) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 6.5v7M12 17.5v.01' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+.toast.info::before {
+  background: var(--signal) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 11v6.5M12 6.5v.01' fill='none' stroke='%2310162B' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E") center / 14px no-repeat;
 }
 
 /* ---------- Spinner ---------- */

@@ -5,11 +5,13 @@ const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 // ------------------------------------------------------------------ toast
 
 let toastTimer = 0;
-export function toast(text, { error = false, ms } = {}) {
+/** Short status message. `info` swaps the check mark for a neutral "i". */
+export function toast(text, { error = false, info = false, ms } = {}) {
   const box = document.getElementById('toast');
   if (!box) return;
   box.textContent = text;
   box.classList.toggle('error', error);
+  box.classList.toggle('info', info && !error);
   box.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => box.classList.remove('show'), ms ?? (error ? 5000 : 2600));

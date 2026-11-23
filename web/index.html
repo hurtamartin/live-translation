@@ -24,7 +24,7 @@
 <header class="top">
   <svg class="mark" viewBox="0 0 120 120" aria-hidden="true"><circle cx="42.9" cy="60" r="10.8"/><path d="M59.5 40.2A25.8 25.8 0 0 1 59.5 79.8M69.3 28.6A41 41 0 0 1 69.3 91.4"/></svg>
   <h1 id="title">Živý překlad</h1>
-  <span class="onair" id="onair" data-state="off"><i aria-hidden="true"></i><span id="onairText"></span></span>
+  <span class="onair" id="onair" data-state="pending"><i aria-hidden="true"></i><span id="onairText"></span></span>
 </header>
 
 <div class="banner" id="banner" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="bannerText"></span></div>
@@ -42,6 +42,10 @@
     </div>
     <p class="empty-title" id="emptyTitle"></p>
     <p class="empty-body" id="emptyBody"></p>
+    <button type="button" class="btn ghost retry" id="retryBtn" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span id="retryText"></span>
+    </button>
   </div>
 </main>
 
@@ -63,12 +67,15 @@
       </span>
       <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
-    <button type="button" class="play" id="play" data-state="idle">
-      <span class="ring" aria-hidden="true"></span>
-      <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5.8v12.4a1 1 0 0 0 1.5.86l10-6.2a1 1 0 0 0 0-1.72l-10-6.2a1 1 0 0 0-1.5.86z" fill="currentColor"/></svg>
-      <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg>
-      <span class="visually-hidden" id="playLabel"></span>
-    </button>
+    <span class="play-wrap">
+      <span class="ripples" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="spin" aria-hidden="true"></span>
+      <button type="button" class="play" id="play" data-state="idle">
+        <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5.8v12.4a1 1 0 0 0 1.5.86l10-6.2a1 1 0 0 0 0-1.72l-10-6.2a1 1 0 0 0-1.5.86z" fill="currentColor"/></svg>
+        <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2.2" fill="currentColor"/></svg>
+        <span class="visually-hidden" id="playLabel"></span>
+      </button>
+    </span>
     <button type="button" class="icon-btn settings-btn" id="settingsBtn" aria-haspopup="dialog">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="17" r="2.3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
       <span class="visually-hidden" id="settingsLabel"></span>
@@ -76,7 +83,7 @@
   </div>
 </nav>
 
-<dialog class="sheet" id="langSheet" aria-labelledby="langTitle">
+<dialog class="sheet" id="langSheet" aria-labelledby="langTitle" tabindex="-1">
   <div class="sheet-grip" aria-hidden="true"></div>
   <div class="sheet-head">
     <h2 id="langTitle"></h2>
@@ -90,7 +97,7 @@
   </div>
 </dialog>
 
-<dialog class="sheet" id="settingsSheet" aria-labelledby="settingsTitle">
+<dialog class="sheet" id="settingsSheet" aria-labelledby="settingsTitle" tabindex="-1">
   <div class="sheet-grip" aria-hidden="true"></div>
   <div class="sheet-head">
     <h2 id="settingsTitle"></h2>

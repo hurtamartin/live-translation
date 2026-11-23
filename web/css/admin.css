@@ -71,7 +71,7 @@ svg.ico {
   background: transparent;
   color: var(--muted);
 }
-.reveal:hover { color: var(--text); background: var(--panel-2); }
+@media (hover: hover) { .reveal:hover { color: var(--text); background: var(--panel-2); } }
 .reveal svg { width: 20px; height: 20px; }
 .reveal .slash { display: none; }
 .reveal[aria-pressed="true"] .slash { display: inline; }
@@ -122,6 +122,16 @@ svg.ico {
 .conn[data-ok="true"] { background: var(--ok-soft); color: var(--ok); }
 .conn[data-ok="true"] i { animation: none; box-shadow: 0 0 0 3px var(--ok-soft); }
 @keyframes blink { 50% { opacity: 0.3; } }
+
+/* Lost the status feed: everything below the bar is stale, so it fades back a little.
+   The delay keeps the first connect and short blips from flickering. */
+.console .hero, .console .grid { transition: opacity 0.3s var(--ease), filter 0.3s var(--ease); }
+.console:has(.conn[data-ok="false"]) .hero,
+.console:has(.conn[data-ok="false"]) .grid {
+  opacity: 0.55;
+  filter: saturate(0.4);
+  transition: opacity 0.6s var(--ease) 1.5s, filter 0.6s var(--ease) 1.5s;
+}
 
 .top-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .top-actions .btn { min-height: 40px; padding: 8px 14px; }
@@ -562,7 +572,7 @@ svg.ico {
 .ch-actions label { display: inline-flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--muted); cursor: pointer; }
 .ch-actions .switch { transform: scale(0.8); margin: -3px -5px; }
 .ch-actions .icon-btn { width: 34px; height: 34px; background: transparent; border-color: transparent; color: var(--muted); }
-.ch-actions .icon-btn:hover { color: var(--danger); background: var(--danger-soft); }
+@media (hover: hover) { .ch-actions .icon-btn:hover { color: var(--danger); background: var(--danger-soft); } }
 .ch-actions .icon-btn svg { width: 17px; height: 17px; }
 .channels > li.hint { padding: 14px; border-radius: var(--radius-m); border: 1px dashed var(--line-strong); text-align: center; }
 
@@ -605,7 +615,7 @@ svg.ico {
   line-height: 1.55;
 }
 .log li { display: flex; gap: 12px; padding: 2px 8px; border-radius: 6px; }
-.log li:hover { background: var(--panel-2); }
+@media (hover: hover) { .log li:hover { background: var(--panel-2); } }
 .log time { color: var(--muted); flex: none; }
 .log span { overflow-wrap: anywhere; min-width: 0; }
 .log .warning { background: rgb(245 184 61 / 0.08); }
