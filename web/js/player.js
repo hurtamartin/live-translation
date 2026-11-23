@@ -7,20 +7,9 @@
 
 const OPUS_CONFIG = { codec: 'opus', sampleRate: 48000, numberOfChannels: 1 };
 
-function resample(input, from, to) {
-  if (from === to) return input;
-  const ratio = from / to;
-  const n = Math.floor(input.length / ratio);
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = i * ratio;
-    const i0 = x | 0;
-    const i1 = Math.min(i0 + 1, input.length - 1);
-    const f = x - i0;
-    out[i] = input[i0] * (1 - f) + input[i1] * f;
-  }
-  return out;
-}
+// Jitter buffer (seconds). Starts small and adapts in the worklet: grows after a
+// dropout caused by the network, shrinks again while playback stays clean.
+const BUFFER = { target: 0.15, minTarget: 0.1, maxTarget: 0.8, max: 2.5 };
 
 function audioDataToFloat(data) {
   const n = data.numberOfFrames;
@@ -65,20 +54,23 @@ export class LivePlayer {
     this.node = null;
     this.decoder = null;
     this.ts = 0;
-    this.lastSeq = -1;
+    this.inRate = OPUS_CONFIG.sampleRate;
   }
 
   /** Must be called from a user gesture. */
   async start() {
     preferPlayback();
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    try { this.ctx = new Ctx({ latencyHint: 'interactive', sampleRate: 48000 }); }
-    catch { this.ctx = new Ctx({ latencyHint: 'interactive' }); }
+    // Native device rate (the worklet resamples) and 'playback' latency: larger
+    // hardware buffers, so a busy phone does not crackle. Costs a few tens of ms,
+    // small next to the translation delay itself.
+    try { this.ctx = new Ctx({ latencyHint: 'playback' }); }
+    catch { this.ctx = new Ctx(); }
     const resumed = this.ctx.resume();
     await this.ctx.audioWorklet.addModule('/js/player-worklet.js');
     this.node = new AudioWorkletNode(this.ctx, 'translation-player', {
       numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
-      processorOptions: { target: 0.16, max: 1.2 },
+      processorOptions: { inRate: this.inRate, ...BUFFER },
     });
     this.node.port.onmessage = (e) => this.onLevel(e.data.rms, e.data.buffered);
     this.node.connect(this.ctx.destination);
@@ -109,8 +101,11 @@ export class LivePlayer {
     const rate = data.sampleRate;
     const f = audioDataToFloat(data);
     data.close();
-    const out = resample(f, rate, this.ctx.sampleRate);
-    this.node.port.postMessage(out, [out.buffer]);
+    if (rate !== this.inRate) {
+      this.inRate = rate;
+      this.node.port.postMessage({ rate });
+    }
+    this.node.port.postMessage(f, [f.buffer]);
   }
 
   flush() { if (this.node) this.node.port.postMessage('flush'); }

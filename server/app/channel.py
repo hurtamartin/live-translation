@@ -7,9 +7,10 @@ import collections
 import json
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .audio.codecs import Mp3Encoder, OpusEncoder
+from .audio.jitter import JitterBuffer
 from .clients import Client, StreamSink
 from .gemini import GeminiConnection, SetupError, build_setup
 from .util import spawn
@@ -23,17 +24,49 @@ OUT_RATE = 24000
 FRAME_S = 0.04                          # 40 ms Opus frames
 FRAME_SAMPLES = int(OUT_RATE * FRAME_S)  # 960
 FRAME_BYTES = FRAME_SAMPLES * 2
-PREBUFFER_S = 0.2                       # absorbs uneven arrival of Gemini audio
-PREBUFFER_BYTES = int(OUT_RATE * PREBUFFER_S) * 2
 HANGOVER_FRAMES = 12                    # keep clients' clocks running across short gaps
-MAX_FIFO_BYTES = OUT_RATE * 2 * 20      # never let latency grow past 20 s
 SENTENCE_END = tuple(".!?…。！？")
 HISTORY = 80
 HISTORY_SENT = 40                       # segments a newly joined listener receives
 GAP_BLOCKS = 50                         # audio kept while reconnecting (5 s of 100 ms blocks)
 GAP_MAX_AGE = 8.0                       # older buffered audio is stale, not worth translating
-DRAIN_S = 6.0                           # an old session finishes its sentence after goAway
+DRAIN_S = 6.0                           # an old session may finish its sentence after goAway...
+DRAIN_QUIET = 1.0                       # ...until it has been silent this long
+HELD_MAX = 2000                         # events of the new session held back meanwhile
 MAX_BACKOFF = 20.0
+
+
+class _Session:
+    """Routes the events of one Gemini session to its channel.
+
+    After goAway the old session keeps translating what it has already heard
+    while the new one starts. Their output must not interleave (alternating
+    chunks of two voices, words of two sentences mixed in one block), so the
+    channel holds the new session's output back until the old one is done.
+    """
+
+    __slots__ = ("ch", "last_event", "finished")
+
+    def __init__(self, ch: "Channel") -> None:
+        self.ch = ch
+        self.last_event = 0.0
+        self.finished = False
+
+    def on_input_text(self, text: str, lang: str | None) -> None:
+        self.ch._route(self, self.ch.on_input_text, text, lang)
+
+    def on_output_text(self, text: str) -> None:
+        self.ch._route(self, self.ch.on_output_text, text)
+
+    def on_audio(self, pcm: bytes) -> None:
+        self.ch._route(self, self.ch.on_audio, pcm)
+
+    def on_turn_complete(self) -> None:
+        self.finished = True
+        self.ch._route(self, self.ch.on_turn_complete)
+
+    def on_usage(self, tokens: int) -> None:
+        self.ch.on_usage(tokens)   # billed either way
 
 
 class Channel:
@@ -52,6 +85,11 @@ class Channel:
         # Input that arrives while a dropped session is being replaced; sent to the
         # new session so no words are lost to the gap.
         self._gap: collections.deque[tuple[float, str]] = collections.deque(maxlen=GAP_BLOCKS)
+        # Session hand-over (goAway): see _Session.
+        self._active_src: _Session | None = None
+        self._draining: _Session | None = None
+        self._drain_task: asyncio.Task | None = None
+        self._held: collections.deque[tuple[Callable, tuple]] = collections.deque(maxlen=HELD_MAX)
 
         self.segments: collections.deque[dict] = collections.deque(maxlen=HISTORY)
         self._seg: dict | None = None
@@ -60,11 +98,10 @@ class Channel:
         self._last_text = 0.0
         self._hist_cache: str | None = None
 
-        self.fifo = bytearray()
+        self.jitter = JitterBuffer(OUT_RATE, FRAME_SAMPLES)
         self._pacer: asyncio.Task | None = None
-        self._first_audio = 0.0
-        self._last_audio = 0.0
         self.seq = 0
+        self.stalls = 0
 
         self.detected = ""
         self.last_output = 0.0
@@ -122,6 +159,12 @@ class Channel:
         if task is not None:
             task.cancel()
         self.active = None
+        self._active_src = None
+        self._draining = None
+        self._held.clear()
+        if self._drain_task is not None:
+            self._drain_task.cancel()   # closes the old session
+            self._drain_task = None
         self._gap.clear()
         self._update_pacer()
         return task
@@ -163,6 +206,7 @@ class Channel:
         backoff = 1.0
         first = True
         current: GeminiConnection | None = None   # the session this supervisor owns
+        current_src: _Session | None = None
         try:
             while True:
                 try:
@@ -170,7 +214,7 @@ class Channel:
                         if self.active is current:
                             self.active = None
                         await current.close()
-                        current = None
+                        current = current_src = None
                     if self.active is None:
                         self._set_status("connecting" if first else "reconnecting", self.error)
                     first = False
@@ -184,7 +228,8 @@ class Channel:
                     s = engine.settings
                     setup = build_setup(s.model, self.lang, s.echo_target, s.system_instruction,
                                         engine.placement)
-                    conn = GeminiConnection(engine.http, engine.env.gemini_ws_url, key, setup, self,
+                    src = _Session(self)
+                    conn = GeminiConnection(engine.http, engine.env.gemini_ws_url, key, setup, src,
                                             f"[{self.lang}]")
                     try:
                         await conn.open()
@@ -203,10 +248,12 @@ class Channel:
                         await conn.close()
                         raise
 
-                    old, current = current, conn
+                    old, old_src = current, current_src
+                    current, current_src = conn, src
                     self.active = conn
-                    if old is not None:
-                        old.close_later(DRAIN_S)   # let the old session finish its sentence
+                    self._active_src = src
+                    if old is not None and old_src is not None:
+                        self._hand_over(old, old_src)   # old one finishes its sentence first
                     self._flush_gap(conn)
                     self.connects += 1
                     backoff = 1.0
@@ -217,8 +264,12 @@ class Channel:
                         continue  # open the next session while this one keeps running
                     if self.active is conn:
                         self.active = None
-                    current = None
+                        self._active_src = None
+                    current = current_src = None
                     await conn.close()
+                    if conn.close_reason and engine.placement.adapt(conn.close_reason):
+                        log.info("[%s] Google rejected an optional field, it is no longer sent",
+                                 self.lang)
                     self._set_status("reconnecting", conn.close_reason or "Spojení s Google se přerušilo.")
                     await asyncio.sleep(0.1 if backoff <= 1 else backoff)
                     backoff = min(backoff * 2, MAX_BACKOFF)
@@ -239,6 +290,55 @@ class Channel:
                 self._gap.clear()
                 self._set_status("idle")
 
+    # ------------------------------------------------------------- hand-over
+
+    def _route(self, src: _Session, fn: Callable, *args) -> None:
+        src.last_event = time.monotonic()
+        if src is self._draining:
+            fn(*args)
+        elif src is self._active_src:
+            if self._draining is not None:
+                self._held.append((fn, args))
+            else:
+                fn(*args)
+        # else: a session that is being closed; its output is no longer wanted
+
+    def _hand_over(self, old: GeminiConnection, src: _Session) -> None:
+        if self._draining is not None:
+            # Two hand-overs within DRAIN_S: stop waiting for the oldest session.
+            self._release_held()
+        if self._drain_task is not None:
+            self._drain_task.cancel()
+        src.finished = False
+        self._draining = src
+        self._drain_task = spawn(self._drain(old, src), f"gemini-drain-{self.lang}")
+
+    async def _drain(self, conn: GeminiConnection, src: _Session) -> None:
+        start = time.monotonic()
+        try:
+            while conn.alive:
+                now = time.monotonic()
+                if (src.finished or now - start >= DRAIN_S
+                        or now - max(src.last_event, start) >= DRAIN_QUIET):
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            if self._draining is src:
+                self._release_held()
+            if self._drain_task is asyncio.current_task():
+                self._drain_task = None
+            await conn.close()
+
+    def _release_held(self) -> None:
+        self._draining = None
+        held = list(self._held)
+        self._held.clear()
+        self._brk = True   # the new session's words start a new block
+        for fn, args in held:
+            fn(*args)
+
+    # ------------------------------------------------------------- input
+
     @property
     def wants_audio(self) -> bool:
         """A session is live or being (re)opened, so input should not be dropped."""
@@ -250,6 +350,12 @@ class Channel:
             conn.send_audio(message)
         elif self._task is not None:
             self._gap.append((time.monotonic(), message))
+
+    def end_audio(self) -> None:
+        """The noise gate closed: let Google flush what it has buffered right away."""
+        conn = self.active
+        if conn is not None and conn.alive and self.engine.placement.stream_end:
+            conn.send_stream_end()
 
     def _flush_gap(self, conn: GeminiConnection) -> None:
         cutoff = time.monotonic() - GAP_MAX_AGE
@@ -281,15 +387,7 @@ class Channel:
         self.audio_seconds += len(pcm) / (OUT_RATE * 2)
         if self._pacer is None:
             return
-        now = time.monotonic()
-        if not self.fifo:
-            self._first_audio = now
-        self._last_audio = now
-        self.fifo += pcm
-        if len(self.fifo) > MAX_FIFO_BYTES:
-            # Drop whole samples from the front so the stream stays 16-bit aligned.
-            excess = len(self.fifo) - MAX_FIFO_BYTES
-            del self.fifo[: excess + (excess & 1)]
+        self.jitter.push(pcm, time.monotonic())
 
     def _append(self, kind: str, text: str) -> None:
         now = time.monotonic()
@@ -375,21 +473,21 @@ class Channel:
         elif not need and self._pacer is not None:
             self._pacer.cancel()
             self._pacer = None
-            self.fifo.clear()
+            self.jitter.clear()
 
     def _pacer_died(self, task: asyncio.Task) -> None:
         """The pacer ended on its own (should not happen): start a fresh one."""
         if self._pacer is task and not task.cancelled():
             self._pacer = None
-            self.fifo.clear()
+            self.jitter.clear()
             asyncio.get_running_loop().call_later(1.0, self._update_pacer)
 
     async def _pace(self) -> None:
         """Real-time clock for the outgoing audio.
 
-        Gemini delivers audio in uneven bursts. The pacer turns it into a steady
-        40 ms frame stream: Opus frames for app listeners (only while there is
-        speech) and a continuous MP3 stream for background listeners.
+        The jitter buffer turns Gemini's uneven bursts into a steady 40 ms frame
+        stream: Opus frames for app listeners (only while there is speech) and a
+        continuous MP3 stream for background listeners.
         """
         asyncio.current_task().add_done_callback(self._pacer_died)
         loop = asyncio.get_running_loop()
@@ -401,8 +499,7 @@ class Channel:
             except Exception:
                 log.exception("[%s] Opus encoder unavailable, app audio disabled", self.lang)
         silence = bytes(FRAME_BYTES)
-        fifo = self.fifo
-        playing = False
+        jitter = self.jitter
         hang = 0
         errors = 0
         t = loop.time()
@@ -413,31 +510,21 @@ class Channel:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 elif delay < -1.0:
-                    t = loop.time()   # event loop stalled: resync instead of bursting
+                    # Event loop stalled: resync instead of bursting a second of frames.
+                    self.stalls += 1
+                    t = loop.time()
 
-                now = time.monotonic()
-                if not playing and fifo and (len(fifo) >= PREBUFFER_BYTES
-                                             or now - self._first_audio >= PREBUFFER_S):
-                    playing = True
-                frame = silence
-                if playing:
-                    if len(fifo) >= FRAME_BYTES:
-                        frame = bytes(fifo[:FRAME_BYTES])
-                        del fifo[:FRAME_BYTES]
-                    elif fifo and now - self._last_audio > 0.3:
-                        frame = bytes(fifo).ljust(FRAME_BYTES, b"\0")
-                        fifo.clear()
-                    else:
-                        playing = False
-                if frame is not silence:
+                frame = jitter.next_frame(time.monotonic())
+                if frame is not None:
                     hang = HANGOVER_FRAMES
                 elif hang:
                     hang -= 1
+                pcm = silence if frame is None else frame
 
                 try:
-                    if (frame is not silence or hang) and opus is not None and self.audio_clients:
+                    if (frame is not None or hang) and opus is not None and self.audio_clients:
                         self.seq = (self.seq + 1) & 0xFFFFFFFF
-                        packet = b"\x01" + self.seq.to_bytes(4, "big") + opus.encode(frame)
+                        packet = b"\x01" + self.seq.to_bytes(4, "big") + opus.encode(pcm)
                         for c in self.audio_clients:
                             c.send_audio(packet)
 
@@ -445,7 +532,7 @@ class Channel:
                         if mp3 is None and Mp3Encoder.available():
                             mp3 = Mp3Encoder(OUT_RATE)
                         if mp3 is not None:
-                            data = mp3.encode(frame)
+                            data = mp3.encode(pcm)
                             if data:
                                 for sink in self.streams:
                                     sink.push(data)
@@ -483,6 +570,9 @@ class Channel:
             "connects": self.connects,
             "audioMinutes": round(self.audio_seconds / 60, 1),
             "stopping": self._stop_handle is not None,
+            "dropped": self.active.dropped if self.active is not None else 0,
+            "stalls": self.stalls,
+            **self.jitter.stats(),
         }
 
     async def shutdown(self) -> None:

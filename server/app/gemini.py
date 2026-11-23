@@ -14,13 +14,15 @@ from urllib.parse import quote
 
 import aiohttp
 
-from .util import spawn
-
 log = logging.getLogger(__name__)
 
 SETUP_TIMEOUT = 15.0
 MAX_MESSAGE = 32 * 1024 * 1024   # Gemini audio chunks are ~100 kB; refuse anything absurd
 SEND_QUEUE = 50                  # 5 s of 100 ms input blocks
+# A session that keeps receiving speech but has said nothing at all for this
+# many 100 ms blocks is considered hung (seen with preview backends) and replaced.
+STALL_BLOCKS = 300
+STREAM_END = '{"realtimeInput":{"audioStreamEnd":true}}'
 
 
 class Events(Protocol):
@@ -41,19 +43,26 @@ class SetupError(Exception):
 
 
 class Placement:
-    """Where optional setup fields go. Shared by all sessions.
+    """Where optional setup fields go, and which optional messages are sent.
+    Shared by all sessions.
 
     The documented layout is used first; if Google rejects a field's position
     (`Unknown name "x" at 'setup...'`), the field is moved and the session retried.
+    If Google rejects `audioStreamEnd`, it is no longer sent.
     """
 
     def __init__(self) -> None:
         self.where = {"inputAudioTranscription": "top", "outputAudioTranscription": "top",
                       "translationConfig": "gen"}
         self.failed: dict[str, set[str]] = {k: set() for k in self.where}
+        self.stream_end = True
 
     def adapt(self, reason: str) -> bool:
         changed = False
+        if self.stream_end and re.search(r"audio_?stream_?end", reason, re.I):
+            self.stream_end = False
+            log.warning("Google rejected audioStreamEnd, it will not be sent any more")
+            changed = True
         for m in re.finditer(r"Unknown name \"(\w+)\" at 'setup(\.generation_?config)?'", reason, re.I):
             field, where = m.group(1), ("gen" if m.group(2) else "top")
             if field not in self.where or self.where[field] != where:
@@ -129,6 +138,8 @@ class GeminiConnection:
         self._tasks: list[asyncio.Task] = []
         self.ended: asyncio.Future[str] | None = None
         self.dropped = 0
+        self._unanswered = 0        # audio blocks sent since the last message from Google
+        self._stalled = False
         self._rate_warned = False
         self._bad_warned = False
         self._closing = False
@@ -139,8 +150,8 @@ class GeminiConnection:
     @property
     def alive(self) -> bool:
         """Open and still reading: input sent now will be translated."""
-        return (not self._closing and self.ws is not None and not self.ws.closed
-                and bool(self._tasks) and not self._tasks[0].done())
+        return (not self._closing and not self._stalled and self.ws is not None
+                and not self.ws.closed and bool(self._tasks) and not self._tasks[0].done())
 
     async def open(self) -> None:
         loop = asyncio.get_running_loop()
@@ -178,6 +189,20 @@ class GeminiConnection:
         ]
 
     def send_audio(self, message: str) -> None:
+        self._enqueue(message)
+        self._unanswered += 1
+        if self._unanswered >= STALL_BLOCKS and not self._stalled:
+            self._stalled = True
+            self.close_reason = "Google přestal odpovídat, relace se obnovuje."
+            log.warning("%s: no reply to %.0f s of audio, replacing the session",
+                        self.label, self._unanswered / 10)
+            self._end("stalled")
+
+    def send_stream_end(self) -> None:
+        """Input paused (noise gate closed): Google flushes what it has buffered."""
+        self._enqueue(STREAM_END)
+
+    def _enqueue(self, message: str) -> None:
         q = self._send_q
         if q.full():
             try:
@@ -207,6 +232,7 @@ class GeminiConnection:
                 msg = await self.ws.receive()
                 if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
                     self.last_rx = time.monotonic()
+                    self._unanswered = 0
                     if self._dispatch(msg) == "goaway":
                         self._end("goaway")
                     continue
@@ -300,12 +326,6 @@ class GeminiConnection:
     async def wait(self) -> str:
         assert self.ended is not None
         return await asyncio.shield(self.ended)
-
-    def close_later(self, delay: float) -> None:
-        async def _later():
-            await asyncio.sleep(delay)
-            await self.close()
-        spawn(_later(), f"gemini-drain-{self.label}")
 
     async def close(self) -> None:
         self._closing = True

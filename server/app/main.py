@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 
 from aiohttp import web
@@ -23,6 +24,15 @@ def run() -> None:
         log.error("Web files not found in %s", env.web_dir)
     engine = Engine(store, env)
     app = create_app(engine)
+
+    async def freeze_heap(_app) -> None:
+        # Everything allocated so far lives for the whole run. Moving it out of
+        # the collector's reach keeps full GC passes short: a long pass pauses
+        # the event loop, and with it every listener's audio clock.
+        gc.collect()
+        gc.freeze()
+
+    app.on_startup.append(freeze_heap)
 
     try:
         import uvloop  # type: ignore

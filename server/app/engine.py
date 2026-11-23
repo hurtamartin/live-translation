@@ -21,12 +21,14 @@ from .channel import Channel
 from .clients import Client
 from .config import Env, SettingsStore
 from .gemini import Placement
-from .util import spawn
+from .util import every, spawn
 
 log = logging.getLogger(__name__)
 
 BLOCK = 1600  # 100 ms at 16 kHz, the chunk size Google recommends
 PREROLL_BLOCKS = 3  # 300 ms sent ahead of the gate opening, so first syllables survive
+LAG_PROBE_S = 0.25  # event loop responsiveness check
+LAG_WARN_S = 0.15   # a stall this long is audible: every listener's audio clock stops
 
 
 class Engine:
@@ -48,6 +50,8 @@ class Engine:
         self.sent_seconds = 0.0
         self.started = time.time()
         self._info: str | None = None
+        self.loop_lag = 0.0       # recent worst event loop stall, seconds (decays)
+        self._lag_task: asyncio.Task | None = None
 
     @property
     def settings(self):
@@ -63,9 +67,30 @@ class Engine:
             log.warning("libopus missing: phones fall back to the MP3 stream")
         self._sync_channels()
         await self._start_source()
+        self._lag_task = asyncio.create_task(self._watch_loop(), name="loop-lag")
+
+    async def _watch_loop(self) -> None:
+        """Measure how late the event loop wakes up.
+
+        All audio is paced on this loop, so anything that blocks it (slow disk,
+        a heavy request) is heard as a dropout by every listener at once.
+        """
+        loop = asyncio.get_running_loop()
+        t = loop.time()
+        while True:
+            await asyncio.sleep(LAG_PROBE_S)
+            now = loop.time()
+            lag = max(0.0, now - t - LAG_PROBE_S)
+            t = now
+            self.loop_lag = max(lag, self.loop_lag * 0.97)
+            if lag >= LAG_WARN_S and every("loop-lag", 60):
+                log.warning("Event loop was blocked for %.0f ms: listeners may hear a dropout",
+                            lag * 1000)
 
     async def stop(self) -> None:
         """Graceful shutdown, bounded in time (docker stop allows ~10 s)."""
+        if self._lag_task is not None:
+            self._lag_task.cancel()
         channels = list(self.channels.values())
         await asyncio.gather(*(ch.stop() for ch in channels), return_exceptions=True)
         await self.source.stop()
@@ -179,6 +204,11 @@ class Engine:
         live = s.on_air and any(ch.wants_audio for ch in self.channels.values())
         if not (live and self.gate_open):
             self._preroll.append(block)
+            if self.sending and live:
+                # Speech paused: without this, Google may keep the end of the last
+                # sentence until the next one starts.
+                for ch in self.channels.values():
+                    ch.end_audio()
             self.sending = False
             return
         if opening:
@@ -265,6 +295,7 @@ class Engine:
             "channels": [self.channels[l].info() for l in s.languages if l in self.channels],
             "clients": len(self.clients),
             "codecs": codecs(),
+            "loopLagMs": round(self.loop_lag * 1000),
         }
 
     def clear_history(self) -> None:

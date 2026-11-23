@@ -68,8 +68,10 @@ class OpusEncoder:
             raise RuntimeError(f"opus_encoder_create failed ({err.value})")
         self._st = ctypes.c_void_p(st)
         self.frame_samples = frame_samples
+        # Complexity 10 (best quality) costs well under 1 % of a core per language:
+        # one encode per 40 ms, shared by every listener.
         for req, val in ((OPUS_SET_BITRATE_REQUEST, bitrate),
-                         (OPUS_SET_COMPLEXITY_REQUEST, 5),
+                         (OPUS_SET_COMPLEXITY_REQUEST, 10),
                          (OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_VOICE)):
             _opus.opus_encoder_ctl(self._st, ctypes.c_int(req), ctypes.c_int32(val))
         self._out = ctypes.create_string_buffer(self.MAX_PACKET)

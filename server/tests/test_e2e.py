@@ -249,6 +249,51 @@ def test_forwarded_headers_from_trusted_proxy(tmp_path):
     asyncio.run(main())
 
 
+def test_gate_close_flushes_google(tmp_path):
+    async def main():
+        mock_gemini.STREAM_ENDS.clear()
+        settings = {"gate_enabled": True, "gate_threshold_db": -40, "gate_hold_ms": 200}
+        async with running(tmp_path, settings) as (client, engine):
+            ws = await listener(client, "en")
+            await wait_for(lambda: engine.channels["en"].status == "live")
+            await login(client)
+            ingest = await client.ws_connect("/ws/ingest")
+            await speak(ingest, 0.5, realtime=True)
+            for _ in range(6):                       # 0.6 s of silence: the gate closes
+                await ingest.send_bytes(bytes(3200))
+                await asyncio.sleep(0.1)
+            await wait_for(lambda: "en" in mock_gemini.STREAM_ENDS)
+            assert not engine.sending
+            await ws.close()
+    asyncio.run(main())
+
+
+def test_admin_disabled_without_password(tmp_path):
+    async def main():
+        async with running(tmp_path, admin_password="") as (client, engine):
+            for pw in ("", "anything"):
+                r = await client.post("/api/admin/login", json={"password": pw})
+                assert r.status == 503
+                assert "ADMIN_PASSWORD" in (await r.json())["error"]
+            r = await client.get("/api/admin/config")
+            assert r.status == 401
+    asyncio.run(main())
+
+
+def test_status_reports_audio_health(tmp_path):
+    async def main():
+        async with running(tmp_path) as (client, engine):
+            ws = await listener(client, "en")
+            await wait_for(lambda: engine.channels["en"].status == "live")
+            st = engine.status()
+            assert "loopLagMs" in st
+            ch = st["channels"][0]
+            for key in ("underruns", "prebufferMs", "backlogMs", "skippedMs", "stalls"):
+                assert key in ch
+            await ws.close()
+    asyncio.run(main())
+
+
 def test_qr_and_static(tmp_path):
     async def main():
         async with running(tmp_path) as (client, engine):

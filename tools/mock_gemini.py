@@ -23,6 +23,7 @@ from aiohttp import WSMsgType, web
 
 SRC = "dobrý den vítám vás na dnešním setkání a děkuji že jste přišli".split()
 TONE = (0.15 * np.sin(2 * np.pi * 330 * np.arange(24000) / 24000) * 32767).astype("<i2").tobytes()
+STREAM_ENDS: list[str] = []   # languages that got audioStreamEnd (inspected by tests)
 
 
 async def handler(request: web.Request) -> web.WebSocketResponse:
@@ -47,7 +48,11 @@ async def handler(request: web.Request) -> web.WebSocketResponse:
     async for msg in ws:
         if msg.type != WSMsgType.TEXT:
             continue
-        audio = json.loads(msg.data).get("realtimeInput", {}).get("audio")
+        rt = json.loads(msg.data).get("realtimeInput", {})
+        if rt.get("audioStreamEnd"):
+            STREAM_ENDS.append(lang)
+            continue
+        audio = rt.get("audio")
         if not audio:
             continue
         n = len(base64.b64decode(audio["data"])) // 2

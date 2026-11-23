@@ -22,14 +22,17 @@ lze přidat na plochu jako PWA.
 ## Rychlý start
 
 ```bash
-cp .env.example .env          # vyplňte GEMINI_API_KEY a ADMIN_PASSWORD
+cp .env.example .env          # vyplňte ADMIN_PASSWORD (povinné) a GEMINI_API_KEY
 docker compose up -d --build
 ```
 
 - Posluchači: `http://<server>:8080/`
 - Operátor: `http://<server>:8080/admin`
 
-Bez `ADMIN_PASSWORD` se heslo vygeneruje a vypíše do logu (`docker compose logs translator`).
+`ADMIN_PASSWORD` je povinné: bez něj `docker compose` vůbec nespustí kontejner. Heslo se nikde
+negeneruje ani nevypisuje do logu. Server spuštěný mimo compose bez hesla běží, ale administrace
+je vypnutá (přihlášení vrátí chybu s návodem). Starší verze ukládaly vygenerované heslo do
+`settings.json`, při startu se odtud smaže.
 API klíč lze zadat i v administraci; uloží se do svazku `/data` (soubor `settings.json`, práva 600).
 
 ## Odkud server bere zvuk
@@ -61,7 +64,9 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 ## Jak se poslouchá
 
 - **Nízké zpoždění (výchozí):** Opus rámce přes WebSocket, dekódování WebCodecs, přehrávání přes
-  AudioWorklet s jitter bufferem 160 ms, který se při nahromadění sám dorovná (max 1,2 s).
+  AudioWorklet s adaptivním jitter bufferem: začíná na 150 ms, po výpadku Wi-Fi se sám zvětší
+  (max 0,8 s) a při čistém přehrávání se zase zmenšuje (min 0,1 s). Když se zvuk nahromadí, hraje
+  až o 4 % rychleji (u řeči neslyšitelné), místo aby skákal. Výpadek se doznívá, nikdy neusekne.
 - **Se zamčenou obrazovkou:** přepínač v nastavení posluchače. Klasický `<audio>` MP3 stream,
   hraje i v kapse (iOS jinak Web Audio na pozadí uspí). Zpoždění je o něco vyšší.
 - Text se zobrazuje průběžně po větách, aktuální věta je zvýrazněná, volitelně i původní znění.
@@ -80,7 +85,12 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 | Opus ~20 kbps místo PCM 384 kbps | Na Wi-Fi v sále unese stovky telefonů (200 posluchačů ≈ 4–5 Mbit/s). |
 | Fronty na posluchače | Pomalý telefon zahazuje nejstarší zvukové rámce (zůstane u živého vysílání), ostatní nebrzdí. Kdo nestíhá ani text, je odpojen a po automatickém připojení dostane čerstvou historii. |
 | Nával po zobrazení QR | Fronta příchozích spojení 1024, historie přepisu se serializuje jednou a sdílí, limit otevřených souborů v kontejneru 65536. |
-| Plynulé předání relace | Na `goAway` od Google se otevře nová relace dřív, než stará skončí: překlad nevypadne. |
+| Plynulé předání relace | Na `goAway` od Google se otevře nová relace dřív, než stará skončí: překlad nevypadne. Výstup nové relace se podrží, dokud stará nedořekne větu, takže se dva hlasy ani slova dvou vět nikdy nepromíchají. |
+| Jitter buffer na serveru | Gemini posílá zvuk nepravidelně. Server si před promluvou drží rezervu (0,2–0,6 s, přizpůsobuje se podle toho, jak Google stíhá), po podtečení ji doplní, místo aby zvuk kouskoval, a na hranách zvuk dozní/náběhne (žádné cvaknutí). Když se zpoždění nahromadí přes 1 s, vynechává tiché rámce (pauzy mezi slovy) a dožene ho bez slyšitelného zásahu. |
+| Převzorkování v přehrávači | AudioContext běží na nativní frekvenci telefonu a převzorkování (kubické, spojité přes hranice rámců) dělá worklet. Dřív se vynucovalo 48 kHz, a kde to telefon nevzal, převzorkoval se každý 40ms rámec zvlášť: na hranici rámce se ztratil vzorek a vznikl skok, tedy jemné „tikání“ 25× za sekundu. |
+| Konec promluvy | Když se brána zavře, jde do Google `audioStreamEnd`: poslední věta se přeloží hned, ne až s další promluvou. Pokud by ho model odmítl, server ho přestane posílat sám. |
+| Zamrzlá relace | Když Google na 30 s řeči nic nevrátí, relace se nahradí novou (zvuk z mezery se neztratí). |
+| Hladký takt zvuku | Ukládání nastavení (fsync) běží mimo event loop a GC má zmrazenou haldu, aby nic nezastavilo takt 40 ms. Zaseknutí event loopu se měří a hlásí v administraci i v logu. |
 | Statika | Předkomprimované `.gz`, self-hostovaný font (žádné volání Google Fonts z telefonů), service worker. |
 
 ## Konfigurace (proměnné prostředí)
@@ -88,7 +98,7 @@ doménu s DNS challenge nebo vlastní certifikát. Do administrace pak vyplňte 
 | Proměnná | Výchozí | Popis |
 |---|---|---|
 | `GEMINI_API_KEY` | – | Klíč z Google AI Studia. Má přednost před klíčem z administrace. |
-| `ADMIN_PASSWORD` | vygenerováno | Heslo do `/admin`. |
+| `ADMIN_PASSWORD` | – (povinné) | Heslo do `/admin`, aspoň 12 znaků. Obsahuje-li `$`, dejte hodnotu do jednoduchých uvozovek. |
 | `HTTP_PORT` | `8080` | Port na hostiteli. |
 | `DOMAIN` | – | Doména pro profil `https`. |
 | `MAX_CLIENTS` | `1000` | Strop současných posluchačů (zvlášť pro aplikaci a pro MP3 streamy). |
@@ -119,6 +129,24 @@ Testy (jednotkové i end-to-end proti mocku, bez API klíče, pár sekund):
 cd server && ../.venv/bin/python -m pytest
 ```
 
+### Verze závislostí
+
+Vše je připnuté, aby nasazení vždy dostalo přesně to, co prošlo testy:
+
+- `server/requirements.in` jsou přímé závislosti (povolené rozsahy), `server/requirements.txt`
+  je z nich vygenerovaný lock: přesné verze všech balíčků včetně tranzitivních, s hashi.
+  Docker instaluje jen lock (`--require-hashes`, jen binární wheely).
+- Základní obraz Pythonu (`Dockerfile`) i Caddy (`docker-compose.yml`) jsou připnuté verzí i digestem.
+
+Aktualizace (pak spustit testy a znovu sestavit obraz):
+
+```bash
+pip install uv
+cd server
+uv pip compile requirements.in --universal --python-version 3.12 --generate-hashes -o requirements.txt
+uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes -o requirements-dev.txt
+```
+
 Ikony: `python tools/make_icons.py`.
 
 ## Struktura
@@ -131,6 +159,7 @@ server/app/
   gemini.py              WebSocket klient Gemini Live
   audio/sources.py       zvuková karta (PortAudio/ALSA), prohlížeč, WAV
   audio/codecs.py        ctypes vazby na libopus a libmp3lame
+  audio/jitter.py        jitter buffer přeloženého zvuku (rezerva, dozvuky, dohánění)
 web/
   index.html, js/listener.js, js/player*.js   aplikace pro posluchače (PWA)
   admin.html, js/admin.js, js/ingest-worklet.js   konzole operátora
@@ -139,8 +168,9 @@ web/
 ## Bezpečnost a provoz
 
 - API klíč zůstává na serveru, telefony ho nikdy nevidí.
-- Administrace: heslo, HttpOnly + SameSite=Strict cookie, kontrola `Origin` u všech změn
-  i WebSocketů (ochrana proti CSRF a převzetí WebSocketu z cizí stránky).
+- Administrace: heslo jen z prostředí (`.env`, nikdy v logu ani na disku), HttpOnly +
+  SameSite=Strict cookie, kontrola `Origin` u všech změn i WebSocketů (ochrana proti CSRF
+  a převzetí WebSocketu z cizí stránky).
 - Omezení pokusů o přihlášení: 8 chyb za 5 minut na adresu a celkem 100 za 5 minut pro všechny
   (podvržené nebo střídané adresy tak hádání hesla neobejdou). `X-Forwarded-For` se čte jen
   od důvěryhodné proxy (`TRUSTED_PROXIES`).

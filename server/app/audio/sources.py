@@ -25,6 +25,7 @@ import soxr
 log = logging.getLogger(__name__)
 
 TARGET_RATE = 16000
+BROWSER_STALL_S = 3.0   # browser source connected but silent this long: show it
 Sink = Callable[[np.ndarray], None]
 
 # PortAudio is not thread-safe for (re)initialisation: Pa_Terminate() while another
@@ -181,7 +182,10 @@ class DeviceSource(Source):
                 def callback(indata, frames, time_info, status):  # PortAudio thread
                     if status and status.input_overflow:
                         self.overflows += 1
-                    loop.call_soon_threadsafe(put, indata[:, ch].copy())
+                    try:
+                        loop.call_soon_threadsafe(put, indata[:, ch].copy())
+                    except RuntimeError:
+                        pass   # event loop closed during shutdown
 
                 def open_stream():
                     global _open_streams
@@ -270,12 +274,24 @@ class BrowserSource(Source):
         self.state = "running"
         self.error = ""
         self.detail = label or "Prohlížeč operátora"
+        self.last_data = time.monotonic()
 
     def detach(self, ws) -> None:
         if self.ws is ws:
             self.ws = None
             self.state = "waiting"
             self.detail = "Čeká na prohlížeč operátora"
+
+    def info(self) -> dict:
+        d = super().info()
+        # The socket can stay open while the operator's laptop sleeps or the tab
+        # is throttled: say so instead of showing a healthy "running".
+        silent = time.monotonic() - self.last_data
+        if self.state == "running" and silent > BROWSER_STALL_S:
+            d["state"] = "error"
+            d["error"] = (f"Prohlížeč operátora neposílá zvuk už {silent:.0f} s "
+                          "(uspaný počítač, zavřená nebo skrytá karta?).")
+        return d
 
     def feed(self, data: bytes) -> None:
         if len(data) < 2:

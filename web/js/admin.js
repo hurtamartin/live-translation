@@ -37,13 +37,22 @@ function plural(n, one, few, many) {
   return n === 1 ? one : n >= 2 && n <= 4 ? few : many;
 }
 
+const SERVER_DOWN = 'Server není dostupný. Zkontrolujte, že běží.';
+
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    credentials: 'same-origin',
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      credentials: 'same-origin',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (ex) {
+    // Network failure (server down, no route): not the browser's "Failed to fetch".
+    if (ex instanceof TypeError) throw new Error(SERVER_DOWN);
+    throw ex;
+  }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
   if (res.status === 401 && !path.endsWith('/login')) { showLogin(); throw new Error('Nejste přihlášeni.'); }
@@ -378,6 +387,10 @@ function renderChannels(st) {
       const bits = [];
       if (ch.detected) bits.push(`řečník mluví: ${langCs(ch.detected).toLocaleLowerCase("cs")}`);
       if (ch.audioMinutes) bits.push(`${ch.audioMinutes} min překladu`);
+      // Audio health: dropouts where Google delivered too late, the buffer that
+      // absorbs it now, and how far the audio is behind.
+      if (ch.underruns) bits.push(`výpadky zvuku ${ch.underruns}× (vyrovnávací paměť ${ch.prebufferMs} ms)`);
+      if (ch.backlogMs >= 1000) bits.push(`zvuk o ${(ch.backlogMs / 1000).toFixed(1)} s pozadu`);
       if (ch.stopping) bits.push('bez posluchačů, brzy se ukončí');
       if (bits.length) text += ', ' + bits.join(', ');
     }
@@ -456,6 +469,7 @@ function renderHero(st) {
   else if (st.input.state === 'error' || st.input.kind === 'none') sub = 'Vysílání běží, ale chybí vstupní signál.';
   else if (!liveLangs) sub = 'Vysílání běží. Překlad se spustí, jakmile se připojí první posluchač.';
   else sub = st.input.sending ? 'Signál se právě překládá.' : 'Překlad je připraven a čeká na řeč.';
+  if (on && st.loopLagMs >= 150) sub += ' Server nestíhá (zaseknutí ' + st.loopLagMs + ' ms), posluchači mohou slyšet výpadky.';
   $('heroSub').textContent = sub;
   $('statListeners').textContent = String(listeners);
   $('statLangs').textContent = String(liveLangs);
@@ -682,7 +696,10 @@ window.addEventListener('beforeunload', (e) => {
     const s = await api('GET', '/api/admin/session');
     if (s.authed) await enterConsole();
     else showLogin();
-  } catch {
+  } catch (ex) {
     showLogin();
+    const err = $('loginError');
+    err.textContent = ex.message || SERVER_DOWN;
+    err.hidden = false;
   }
 })();
